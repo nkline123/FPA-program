@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "fpa"
+version = "0.1.0"
+description = "Financial Planning & Analysis calculation engine"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "python-dateutil>=2.8",
+    "networkx>=3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fpa*"]
