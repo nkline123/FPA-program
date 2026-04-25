@@ -26,7 +26,7 @@ class MeasureDAG:
             self._graph.add_node(name)
 
         # Add edges: dependency → measure
-        for measure in self._registry.measures():
+        for measure in self._registry.derived_measures():
             for dep_name in measure.dependencies:
                 if dep_name not in self._registry:
                     raise ValueError(

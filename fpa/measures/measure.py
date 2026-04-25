@@ -36,6 +36,14 @@ class BaseMeasure:
     agg_type: AggType = AggType.SUM
     tags: List[str] = field(default_factory=list)
     description: str = ""
+    sql_expr: str = ""
+    """
+    Optional SQL aggregation expression for DuckDBCalculator.
+    Use {start} and {end} as placeholders for the period's start and end dates.
+    Example: "SUM(CASE WHEN account_id IN ('4000','4010') AND date BETWEEN '{start}' AND '{end}' THEN amount ELSE 0 END)"
+    When provided, DuckDBCalculator uses this instead of the resolver for bulk resolution.
+    The resolver is still required and is used when a plain Calculator is in use.
+    """
 
     def __post_init__(self):
         if not callable(self.resolver):
@@ -82,6 +90,8 @@ class Measure:
     def __post_init__(self):
         if not self.dependencies:
             raise ValueError(f"Measure '{self.name}' must declare at least one dependency")
+        if not callable(self.formula):
+            raise ValueError(f"Measure '{self.name}' formula must be callable")
 
     def __hash__(self):
         return hash(self.name)

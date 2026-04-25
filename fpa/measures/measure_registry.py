@@ -34,7 +34,7 @@ class MeasureRegistry:
     def base_measures(self) -> List[BaseMeasure]:
         return [m for m in self._measures.values() if isinstance(m, BaseMeasure)]
 
-    def measures(self) -> List[Measure]:
+    def derived_measures(self) -> List[Measure]:
         return [m for m in self._measures.values() if isinstance(m, Measure)]
 
     def by_tag(self, tag: str) -> List[AnyMeasure]:
