@@ -6,14 +6,56 @@ from fpa import BaseMeasure, Measure, AggType
 # BaseMeasure
 # ---------------------------------------------------------------------------
 
-def test_base_measure_requires_callable_resolver():
+def test_base_measure_requires_sql_or_resolver():
+    with pytest.raises(ValueError, match="requires either sql or resolver"):
+        BaseMeasure(name="Rev")
+
+
+def test_base_measure_sql_requires_value_col():
+    with pytest.raises(ValueError, match="value_col"):
+        BaseMeasure(
+            name="Rev",
+            sql="SELECT * FROM gl WHERE account_type = 'Income'",
+            # value_col omitted
+        )
+
+
+def test_base_measure_resolver_must_be_callable():
     with pytest.raises(ValueError, match="resolver must be callable"):
-        BaseMeasure(name="Rev", resolver="not_a_function")
+        BaseMeasure(
+            name="Rev",
+            sql="SELECT * FROM gl",
+            value_col="amount",
+            resolver="not_a_function",
+        )
 
 
-def test_base_measure_resolver_called():
+def test_base_measure_sql_only_valid():
+    m = BaseMeasure(
+        name="Revenue",
+        sql="SELECT * FROM gl WHERE account_type = 'Income'",
+        value_col="amount",
+    )
+    assert m.sql == "SELECT * FROM gl WHERE account_type = 'Income'"
+    assert m.value_col == "amount"
+    assert m.resolver is None
+
+
+def test_base_measure_resolver_only_valid():
     m = BaseMeasure(name="Rev", resolver=lambda ctx: 42.0)
     assert m.resolver(None) == 42.0
+    assert m.sql == ""
+
+
+def test_base_measure_both_sql_and_resolver_valid():
+    m = BaseMeasure(
+        name="Rev",
+        sql="SELECT * FROM gl",
+        value_col="amount",
+        resolver=lambda ctx: 0.0,
+    )
+    assert m.sql
+    assert callable(m.resolver)
 
 
 def test_base_measure_default_agg_type():
@@ -22,8 +64,28 @@ def test_base_measure_default_agg_type():
 
 
 def test_base_measure_custom_agg_type():
-    m = BaseMeasure(name="HC", resolver=lambda ctx: 0, agg_type=AggType.LAST_DAY)
+    m = BaseMeasure(
+        name="HC",
+        sql="SELECT * FROM hc",
+        value_col="headcount",
+        agg_type=AggType.LAST_DAY,
+    )
     assert m.agg_type == AggType.LAST_DAY
+
+
+def test_base_measure_date_col_default_empty():
+    m = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
+    assert m.date_col == ""
+
+
+def test_base_measure_custom_date_col():
+    m = BaseMeasure(
+        name="Rev",
+        sql="SELECT * FROM gl",
+        value_col="amount",
+        date_col="period_enddate",
+    )
+    assert m.date_col == "period_enddate"
 
 
 def test_base_measure_tags_default_empty():
@@ -40,13 +102,13 @@ def test_base_measure_tags_mutable_default_not_shared():
 
 def test_base_measure_hash_by_name():
     m1 = BaseMeasure(name="Rev", resolver=lambda ctx: 1)
-    m2 = BaseMeasure(name="Rev", resolver=lambda ctx: 2)
+    m2 = BaseMeasure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
     assert hash(m1) == hash(m2)
 
 
 def test_base_measure_equality_by_name():
     m1 = BaseMeasure(name="Rev", resolver=lambda ctx: 1)
-    m2 = BaseMeasure(name="Rev", resolver=lambda ctx: 2)
+    m2 = BaseMeasure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
     assert m1 == m2
 
 

@@ -1,10 +1,10 @@
 """
-Smoke test — runs end-to-end through the core pipeline without any
-database dependency. Resolvers return values from a simple in-memory
-dict built from the sample CSV.
+Smoke test — runs end-to-end through the full DuckDB-centric pipeline.
 
-In real use, resolvers would call into a database layer built on top
-of this library.
+Loads sample GL and headcount CSVs into an in-memory DuckDB database, defines
+measures using SQL filter queries, and exercises build_table,
+build_breakdown_table (with and without explicit dimension_values), and the
+Python resolver fallback path.
 
 Run from the project root:
   python smoke_test.py
@@ -14,13 +14,13 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
+import duckdb
 import pandas as pd
 from pathlib import Path
+import runpy
 import fpa
 
-# --- 1. Generate and load sample data into memory ---
-import runpy
-
+# --- 1. Generate sample data if needed ---
 sample_path = Path("sample_data/sample_gl.csv")
 if not sample_path.exists():
     print("Generating sample GL data...")
@@ -31,90 +31,64 @@ if not employee_path.exists():
     print("Generating sample employee data...")
     runpy.run_path("sample_data/generate_sample_employees.py", run_name="__main__")
 
-df = pd.read_csv(sample_path, dtype={"account_id": str})
-df["date"] = pd.to_datetime(df["date"])
-print(f"Loaded {len(df):,} GL rows.")
+# --- 2. Load data into DuckDB ---
+con = duckdb.connect()
 
-emp = pd.read_csv(employee_path)
-emp["start_date"] = pd.to_datetime(emp["start_date"])
-emp["end_date"] = pd.to_datetime(emp["end_date"])  # NaT for active employees
-print(f"Loaded {len(emp):,} employee rows.")
+con.execute(f"""
+    CREATE TABLE gl AS
+    SELECT * FROM read_csv_auto('{sample_path}')
+""")
+con.execute(f"""
+    CREATE TABLE employees AS
+    SELECT * FROM read_csv_auto('{employee_path}')
+""")
 
-# --- 2. Build a lookup: (scenario, account_id, "YYYY-MM") → total amount ---
-# This simulates what a database layer would do.
-df["month"] = df["date"].dt.strftime("%Y-%m")
+gl_rows = con.execute("SELECT COUNT(*) FROM gl").fetchone()[0]
+emp_rows = con.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
+print(f"Loaded {gl_rows:,} GL rows and {emp_rows:,} employee rows into DuckDB.")
 
-# Two lookups: one with entity, one without (for all-entity totals)
-monthly = (
-    df.groupby(["scenario", "account_id", "month"])["amount"]
-    .sum()
-    .to_dict()
-)
-monthly_by_entity = (
-    df.groupby(["scenario", "account_id", "month", "entity"])["amount"]
-    .sum()
-    .to_dict()
-)
-
-def query_accounts(account_ids, ctx, sign=1):
-    """Sum amounts for a list of account IDs for the given context."""
-    month_key = ctx.period.start.strftime("%Y-%m")
-    entity = ctx.get("entity")
-    if entity is not None:
-        return sign * sum(
-            monthly_by_entity.get((ctx.scenario, acct, month_key, entity), 0.0)
-            for acct in account_ids
-        )
-    return sign * sum(
-        monthly.get((ctx.scenario, acct, month_key), 0.0)
-        for acct in account_ids
-    )
-
-def query_headcount(ctx):
-    """Count employees active at period end, optionally filtered by entity."""
-    period_end = pd.Timestamp(ctx.period.end)
-    period_start = pd.Timestamp(ctx.period.start)
-    mask = (
-        (emp["start_date"] <= period_end) &
-        (emp["end_date"].isna() | (emp["end_date"] >= period_start))
-    )
-    entity = ctx.get("entity")
-    if entity is not None:
-        mask &= emp["entity"] == entity
-    return float(mask.sum())
+# Inspect columns so the measure definitions reference the right names
+gl_cols = [r[0] for r in con.execute("DESCRIBE gl").fetchall()]
+print(f"GL columns: {gl_cols}")
 
 # --- 3. Define measures ---
 registry = fpa.MeasureRegistry()
 registry.register_many([
     fpa.BaseMeasure(
         name="Revenue",
-        resolver=lambda ctx: query_accounts(
-            ["4000", "4010"], ctx, sign=-1
-        ),
+        # Revenue accounts use credit convention (negative amounts in GL).
+        # Negate in the subquery so SUM returns a positive revenue figure.
+        sql="""
+            SELECT scenario, account_id, date, entity, description, source,
+                   -amount AS amount
+            FROM gl WHERE account_id IN ('4000', '4010')
+        """,
+        value_col="amount",
+        date_col="date",
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
     fpa.BaseMeasure(
         name="COGS",
-        resolver=lambda ctx: query_accounts(
-            ["5000", "5010"], ctx
-        ),
+        sql="SELECT * FROM gl WHERE account_id IN ('5000', '5010')",
+        value_col="amount",
+        date_col="date",
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
     fpa.BaseMeasure(
         name="OpEx",
-        resolver=lambda ctx: query_accounts(
-            ["6000", "6010", "6020", "6030", "6040"], ctx
-        ),
+        sql="SELECT * FROM gl WHERE account_id IN ('6000','6010','6020','6030','6040')",
+        value_col="amount",
+        date_col="date",
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
     fpa.BaseMeasure(
         name="InterestExpense",
-        resolver=lambda ctx: query_accounts(
-            ["7000"], ctx
-        ),
+        sql="SELECT * FROM gl WHERE account_id = '7000'",
+        value_col="amount",
+        date_col="date",
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
@@ -142,30 +116,11 @@ registry.register_many([
         formula=lambda v: v["Operating Income"] - v["InterestExpense"],
         tags=["income_statement"],
     ),
-    fpa.BaseMeasure(
-        name="Headcount",
-        resolver=query_headcount,
-        agg_type=fpa.AggType.LAST_DAY,
-        tags=["headcount"],
-        description="Active employees at end of period",
-    ),
-    fpa.Measure(
-        name="Revenue per Employee",
-        dependencies=["Revenue", "Headcount"],
-        formula=lambda v: v["Revenue"] / v["Headcount"] if v["Headcount"] else 0.0,
-        tags=["headcount"],
-    ),
-    fpa.Measure(
-        name="Cost per Employee",
-        dependencies=["OpEx", "Headcount"],
-        formula=lambda v: v["OpEx"] / v["Headcount"] if v["Headcount"] else 0.0,
-        tags=["headcount"],
-    ),
 ])
 
 # --- 4. Set up calendar and calculator ---
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
-calc = fpa.Calculator(registry)
+calc = fpa.Calculator(registry, connection=con)
 
 fy2024_months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
@@ -174,8 +129,8 @@ measure_names = [
     "OpEx", "Operating Income", "Net Income",
 ]
 
-# --- 5. Calculate and display ---
-print("\n--- FY2024 Actuals ---")
+# --- 5. P&L summary table ---
+print("\n--- FY2024 Actuals (DuckDB path, no dimension) ---")
 actuals = calc.build_table(measure_names, fy2024_months, scenario="Actual")
 
 def fmt(val, name):
@@ -183,39 +138,16 @@ def fmt(val, name):
         return f"{val:>10.1f}%"
     return f"{val:>12,.0f}"
 
-header = f"{'Measure':<20}" + "".join(f"{p.label:>12}" for p in fy2024_months)
-print(header)
-print("-" * len(header))
-for name in measure_names:
-    row = f"{name:<20}" + "".join(fmt(actuals.loc[name, p.label], name) for p in fy2024_months)
-    print(row)
-
-print("\n--- FY2024 Headcount ---")
-hc_measures = ["Headcount", "Revenue per Employee", "Cost per Employee"]
-hc_table = calc.build_table(hc_measures, fy2024_months, scenario="Actual")
-
 header = f"{'Measure':<22}" + "".join(f"{p.label:>12}" for p in fy2024_months)
 print(header)
 print("-" * len(header))
-for name in hc_measures:
-    row = f"{name:<22}" + "".join(fmt(hc_table.loc[name, p.label], name) for p in fy2024_months)
+for name in measure_names:
+    row = f"{name:<22}" + "".join(fmt(actuals.loc[name, p.label], name) for p in fy2024_months)
     print(row)
 
-print("\n--- FY2024 Headcount by Entity ---")
+# --- 6. Revenue breakdown by entity — explicit dimension_values ---
+print("\n--- FY2024 Revenue by Entity (explicit dimension_values) ---")
 entities = ["North", "South", "West"]
-hc_breakdown = calc.build_breakdown_table(
-    "Headcount", fy2024_months, scenario="Actual",
-    dimension="entity", dimension_values=entities,
-)
-
-header = f"{'Entity':<10}" + "".join(f"{p.label:>12}" for p in fy2024_months)
-print(header)
-print("-" * len(header))
-for entity in entities:
-    row = f"{entity:<10}" + "".join(fmt(hc_breakdown.loc[entity, p.label], "") for p in fy2024_months)
-    print(row)
-
-print("\n--- FY2024 Revenue by Entity ---")
 rev_breakdown = calc.build_breakdown_table(
     "Revenue", fy2024_months, scenario="Actual",
     dimension="entity", dimension_values=entities,
@@ -227,5 +159,36 @@ print("-" * len(header))
 for entity in entities:
     row = f"{entity:<10}" + "".join(fmt(rev_breakdown.loc[entity, p.label], "") for p in fy2024_months)
     print(row)
+
+# --- 7. Gross Margin breakdown — all entities, no dimension_values ---
+print("\n--- FY2024 Q1 Gross Margin % by Entity (all groups, no dimension_values) ---")
+q1_periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)[:3]
+gm_breakdown = calc.build_breakdown_table(
+    "Gross Margin %", q1_periods, scenario="Actual",
+    dimension="entity",
+    # dimension_values omitted — DuckDB returns every entity in the data
+)
+
+header = f"{'Entity':<10}" + "".join(f"{p.label:>12}" for p in q1_periods)
+print(header)
+print("-" * len(header))
+for entity in gm_breakdown.index:
+    row = f"{str(entity):<10}" + "".join(fmt(gm_breakdown.loc[entity, p.label], "%") for p in q1_periods)
+    print(row)
+
+# --- 8. Verify Python resolver fallback path ---
+print("\n--- Python resolver fallback (no DuckDB connection) ---")
+py_registry = fpa.MeasureRegistry()
+py_registry.register_many([
+    fpa.BaseMeasure(name="Revenue",  resolver=lambda ctx: 850_000.0),
+    fpa.BaseMeasure(name="COGS",     resolver=lambda ctx: 340_000.0),
+    fpa.Measure(name="Gross Profit", dependencies=["Revenue", "COGS"],
+                formula=lambda v: v["Revenue"] - v["COGS"]),
+])
+py_calc = fpa.Calculator(py_registry)  # no connection
+jan = calendar.month_period(__import__("datetime").date(2024, 1, 1))
+ctx = fpa.CalculationContext.make(period=jan, scenario="Actual")
+print(f"  Revenue:      {py_calc.resolve('Revenue', ctx):>12,.0f}")
+print(f"  Gross Profit: {py_calc.resolve('Gross Profit', ctx):>12,.0f}")
 
 print("\nSmoke test passed.")

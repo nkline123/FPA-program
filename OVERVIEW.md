@@ -1,9 +1,9 @@
 # FPA — Concepts and Design
 
-A Python calculation engine for financial measures across time periods and scenarios.
-It handles the calculation graph — fiscal calendars, measure dependencies, scenario
-awareness, dimensional filtering, and memoization. Data access is the responsibility
-of the calling code.
+A DuckDB-centric Python calculation engine for financial measures across time
+periods and scenarios.  The library handles fiscal calendars, measure
+dependency graphs, scenario awareness, dimensional filtering, memoization, and
+high-throughput SQL execution for both summary tables and dimension breakdowns.
 
 ---
 
@@ -14,18 +14,16 @@ of the calling code.
 - Scopes every resolution to a **period + scenario + optional filters**
 - **Memoizes** results so repeated calls are free
 - Produces **pandas DataFrames** for P&L tables and dimension breakdowns
-- Optionally routes high-cardinality dimension breakdowns through **DuckDB** — one SQL
-  query covering all periods and dimension values, with derived measures computed as
-  vectorized pandas operations
+- Routes base measure resolution through **DuckDB**: wraps each measure's SQL
+  as a subquery, generates `FILTER (WHERE date_col BETWEEN … AND …)` per
+  period, and executes one query per base measure — with or without `GROUP BY`
 
 ## What This Library Does NOT Do
 
-- Connect to databases or execute queries (on the Python path — the caller provides resolvers)
-- Store or cache data between runs (only computed values are memoized, not source data)
-- Aggregate across grains automatically — resolvers handle their own date ranges
-- Enumerate dimension values for breakdowns — the caller provides them
 - Produce reports, charts, or exports
 - Handle forecasting or driver-based projections
+- Aggregate across grains automatically — the period's `start`/`end` dates
+  define the exact range; the SQL `FILTER` clause enforces it
 
 These belong in a layer built on top of this library.
 
@@ -35,8 +33,8 @@ These belong in a layer built on top of this library.
 
 ### Fiscal Calendar
 
-Configure once with the month your fiscal year starts. The calendar converts dates
-into typed `Period` objects and supports navigation between periods.
+Configure once with the month your fiscal year starts.  The calendar converts
+dates into typed `Period` objects and supports period navigation.
 
 ```python
 # Calendar year (Jan–Dec)
@@ -47,13 +45,12 @@ calendar = fpa.FiscalCalendar(fiscal_year_start_month=7, year_label_convention="
 # Jul 2024–Jun 2025 → "FY2025"
 ```
 
-From any period you can navigate to:
-- The **prior period** (same grain, one step back)
-- The **same period in the prior fiscal year**
-- All months **year-to-date** through a given month
-- A **rolling window** of the last N months
+From any period you can navigate to the prior period, the same period last
+fiscal year, YTD months, and rolling windows.
 
-Periods come in three grains: **Month**, **Quarter**, and **Year**.
+Periods come in three grains: **Month**, **Quarter**, and **Year**.  Monthly
+and quarterly periods can be mixed in the same `build_table` or
+`build_breakdown_table` call — each period gets its own `FILTER` clause.
 
 ### Periods
 
@@ -68,101 +65,132 @@ period.fiscal_year       # 2024
 period.fiscal_period_num # 1–12 (month), 1–4 (quarter), 1 (year)
 ```
 
-Resolvers receive `ctx.period.start` and `ctx.period.end` and are responsible for
-interpreting them correctly — whether that means summing within the range (revenue),
-reading the last value in the range (headcount), or accumulating all history through
-the end date (balance sheet).
+The engine embeds `period.start` and `period.end` as ISO date literals in the
+`FILTER` clause of each generated SQL column.  They come from `FiscalCalendar`
+code — not user input — so embedding them as literals is safe.
 
 ### Measures
 
 There are two kinds:
 
-**BaseMeasure** — fetches a raw value from your data source. You provide a resolver
-callable that accepts a `CalculationContext` and returns a float. The library calls it;
-how it gets the float is entirely up to you.
+**BaseMeasure** — fetches raw values from a DuckDB table via a SQL filter
+query.  You write the business-logic WHERE condition; the engine appends the
+date range, scenario, and any extra dimension filters automatically.
 
-Optionally, a `BaseMeasure` can declare a `sql_expr` — a SQL fragment with `{start}`
-and `{end}` placeholders. When the DuckDB path is active, the library uses `sql_expr`
-instead of calling the resolver, enabling one query to cover all periods and dimension
-values simultaneously.
-
-**Measure** — calculated from other measures via a formula callable. For example:
-```
-Gross Profit  = Revenue − COGS
-Gross Margin  = Gross Profit ÷ Revenue × 100
-Net Income    = Gross Profit − OpEx − Interest − Taxes
+```python
+fpa.BaseMeasure(
+    name="Revenue",
+    sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+    value_col="amount",       # column to aggregate
+    date_col="period_enddate",# column to filter by date range
+    agg_type=fpa.AggType.SUM,
+)
 ```
 
-Measures can depend on other measures to any depth. The library resolves them in the
-correct order automatically using a dependency graph and raises an error immediately if
-a circular dependency is detected.
+Every column in the SQL result other than `value_col` and `date_col` is a
+dimension — it can be used as a `GROUP BY` target in `build_breakdown_table`
+without any additional configuration.
+
+**Measure** — calculated from other measures via a formula callable:
+
+```python
+fpa.Measure(
+    name="Gross Profit",
+    dependencies=["Revenue", "COGS"],
+    formula=lambda v: v["Revenue"] - v["COGS"],
+)
+```
+
+Measures can depend on other measures to any depth.  The library resolves them
+in topological order and raises `ValueError` at construction if a cycle is
+detected.
 
 ### AggType
 
-Each measure carries an `agg_type` as metadata for the layer above. The library does
-not use it to perform aggregation — that is the resolver's job.
+Controls how `value_col` is aggregated within a period's date range.
 
-| AggType | Meaning | Examples |
+| AggType | SQL generated | Examples |
 |---|---|---|
-| `SUM` | Flow — accumulates over the period | Revenue, Expenses |
-| `LAST_DAY` | Stock — point-in-time at period end | Headcount, Cash Balance |
-| `AVERAGE` | Rate — average over the period | Average Price, Average Headcount |
-| `CALCULATED` | Ratio — must always be recalculated | Gross Margin %, Growth Rate |
+| `SUM` | `COALESCE(SUM(value_col) FILTER (WHERE …), 0)` | Revenue, Expenses |
+| `AVERAGE` | `COALESCE(AVG(value_col) FILTER (WHERE …), 0)` | Average Price |
+| `LAST_DAY` | `arg_max(value_col, date_col) FILTER (WHERE …)` | Headcount, ARR, Balance |
+| `CALCULATED` | n/a — derived from other measures | Gross Margin %, Growth Rate |
+
+`LAST_DAY` uses DuckDB's `arg_max` aggregate to return `value_col` from the
+row with the latest `date_col` within the period — correct for stock measures
+(headcount, cash balance) where you want the period-end snapshot.
 
 ### Calculation Context
 
-Every resolution is scoped to a `CalculationContext`:
+Every Python-path resolution is scoped to a `CalculationContext`:
+
 - **period** — the time period being resolved
 - **scenario** — the data version ("Actual", "Budget", "Forecast", etc.)
-- **filters** — arbitrary key/value pairs for slicing data (`entity="North"`,
-  `department="Engineering"`, `customer_id=42`)
+- **filters** — arbitrary key/value pairs for slicing data
 
-Contexts are frozen dataclasses. They are hashable and used as memo cache keys.
-Resolvers read only the filter keys they care about via `ctx.get("key")`.
+Contexts are frozen dataclasses, hashable, and used as memo cache keys.  On
+the DuckDB path, scenario and filters become parameterized `WHERE` clauses;
+on the Python path they are passed to the resolver callable.
 
 ### Memoization
 
-Each `(measure_name, CalculationContext)` pair is computed once per `Calculator` instance.
-If multiple measures share a dependency (e.g. both Gross Margin and Operating Margin
-depend on Revenue), Revenue is resolved once and reused. Call `calc.clear_cache()` if
-the underlying data changes.
+Each `(measure_name, CalculationContext)` pair is computed once per
+`Calculator` instance on the Python path.  Call `calc.clear_cache()` if the
+underlying data changes.  The DuckDB path does not use the memo cache (the
+query itself is the source of truth).
 
 ---
 
 ## Execution Paths
 
-### Python path (always available)
+### DuckDB path (primary)
 
-`build_table` always uses the Python path. For each `(period, measure)` cell:
-1. Construct a `CalculationContext`
-2. Walk the dependency graph in topological order
-3. Call each `BaseMeasure.resolver(ctx)` for leaf nodes
-4. Compute each `Measure.formula(values)` for derived nodes
-5. Cache the result
+Active when `connection` is provided to `Calculator` and at least one base
+measure in the dependency chain declares a `sql` query.
 
-This path fires one resolver call per base measure per period. Performance depends
-entirely on how fast your resolvers are. For a 4-measure × 12-month P&L, that is at
-most 48 calls (often fewer, because shared dependencies are memoized). For resolver
-implementations that do a live database call per invocation, pre-loading data into a
-dict first is strongly recommended — see [USAGE.md](USAGE.md#performance--pre-load-data-once).
+For each `BaseMeasure` with `sql`, the engine builds:
 
-### DuckDB path (opt-in, for breakdowns)
+```sql
+SELECT {dimension},                          -- omitted for build_table
+    {agg_func} FILTER (WHERE {date_col} BETWEEN '{start}' AND '{end}') AS "{period.label}",
+    ...                                      -- one column per period
+FROM ({BaseMeasure.sql}) __base
+WHERE {scenario_col} = ?                     -- parameterized
+  [AND {extra_filter} = ? ...]
+  [AND {dimension} IN (?, …)]               -- omitted if dimension_values is None
+GROUP BY {dimension}                         -- omitted for build_table
+```
 
-`build_breakdown_table` routes to DuckDB when:
-1. A `connection` and `table` were passed to `Calculator`, **and**
-2. At least one base measure in the dependency chain declares a `sql_expr`
+One query per base measure is executed.  Measures with `sql` are fetched via
+SQL; measures with only a `resolver` are filled via Python after the query
+returns.  Derived measures are then computed as vectorized pandas operations.
 
-Instead of one resolver call per cell, the library:
-1. Builds one SQL query with all base measures as window expressions across all periods,
-   grouped by the breakdown dimension
-2. Executes it once — DuckDB scans the table once and returns a wide DataFrame
-3. Fills any remaining base measure columns (those without `sql_expr`) via the Python
-   resolver
-4. Computes all derived measures as vectorized pandas operations
+#### Why not one query for all base measures?
 
-At 10M rows, 50K customers, 60 periods: ~2 seconds vs. ~25 seconds for the Python path.
-The crossover point where DuckDB wins is roughly 500+ cells (50 dimension values × 10
-periods or equivalent).
+Different base measures can query different tables or apply different filters,
+so they cannot always be combined into a single `SELECT`.  One query per base
+measure is still highly efficient: DuckDB scans each filtered subquery once
+and returns a wide result covering all periods simultaneously.
+
+#### High-cardinality dimensions
+
+Because there is no `IN (?, …)` clause when `dimension_values=None`, DuckDB
+groups and returns all distinct values natively.  A dimension with 200K
+distinct values is handled in the same single-scan query as one with 10.
+Pass `dimension_values` only when you want to restrict the output to a known
+subset.
+
+### Python path (fallback)
+
+Active when no `connection` is provided, or when no base measure in the
+dependency chain has a `sql` query.
+
+Requires `resolver` on every `BaseMeasure`.  Each resolver is called once per
+`(measure, period, dimension_value)` cell and its result is memoized.  Useful
+for unit testing without a database.
+
+`build_breakdown_table` on the Python path requires explicit `dimension_values`
+— the library cannot enumerate them without a database.
 
 ---
 
@@ -174,17 +202,18 @@ FiscalCalendar  ──► Period objects (hashable, grain-aware)
                          ▼
      CalculationContext (period + scenario + filters)
                          │
-              ┌──────────┴──────────────────────────┐
-              │ Python path                          │ DuckDB path
-              │ (build_table, fallback breakdown)    │ (build_breakdown_table)
-              │                                      │
-              ▼                                      ▼
-  BaseMeasure.resolver(ctx) → float      One SQL query (GROUP BY dimension)
-              │                          returning all base measures × periods
-              ▼                                      │
-  Measure.formula({dep: float}) → float             ▼
-              │                          Vectorized pandas for derived measures
-              └──────────────┬──────────────────────┘
+              ┌──────────┴──────────────────────────────┐
+              │ Python path                              │ DuckDB path
+              │ (no connection / resolver-only measures) │ (connection + sql on measures)
+              │                                          │
+              ▼                                          ▼
+  BaseMeasure.resolver(ctx) → float        One SQL query per BaseMeasure
+              │                            (subquery + FILTER per period
+              │                             + optional GROUP BY dimension)
+              ▼                                          │
+  Measure.formula({dep: float}) → float                 ▼
+              │                            Vectorized pandas for derived measures
+              └──────────────┬────────────────────────────┘
                              │
                              ▼
               pd.DataFrame (measures × periods  OR  dimension values × periods)
@@ -194,30 +223,26 @@ FiscalCalendar  ──► Period objects (hashable, grain-aware)
 
 ## Design Decisions
 
-**Resolvers own data access.** The library never touches a database on the Python path.
-This makes it testable with any data source — a dict, a CSV, a REST API, a database.
+**SQL is the primary data interface.**  BaseMeasure expresses the business
+logic filter in SQL.  The engine handles the mechanical parts (date range,
+scenario, dimension grouping) so measures stay focused on what they mean, not
+how to query them.
 
-**CalculationContext is the single interface between the engine and the outside world.**
-Resolvers receive exactly one argument. Adding a new filter dimension requires no
-library changes — just pass a new keyword argument and read it with `ctx.get("key")`.
+**Every column is a potential dimension.**  Because the SQL uses `SELECT *`,
+any column in the source table — `entity`, `department`, `cost_center`,
+`customer_id` — can be used as a breakdown axis without changing the measure
+definition.
 
-**Filters have no schema.** `entity`, `customer`, `department`, `product`, `region` —
-any key/value pair works. Resolvers ignore keys they don't care about.
+**Period dates are SQL literals; everything else is parameterized.**  Dates
+come from `FiscalCalendar` code, not user input, so embedding them as ISO
+literals is safe.  Scenario, filter values, and dimension values are always
+bound as `?` parameters.
 
-**AggType is documentation, not behavior.** The library does not know whether a measure
-is a flow or a stock. Resolvers decide by how they interpret `ctx.period.start` and
-`ctx.period.end`. AggType tells the layer above how to present and aggregate values.
+**AggType drives the SQL aggregation function.**  `SUM`, `AVG`, and `arg_max`
+are generated automatically from the measure's `agg_type`.
 
-**Memoization is keyed on the frozen context.** Because `CalculationContext` is frozen
-and hashable, the same `(measure, context)` pair can never be computed twice in one
-session. This makes it safe to call `resolve()` recursively from inside a resolver
-(e.g. for prior-period comparisons).
+**Circular dependencies fail at construction time.**  The DAG is validated
+when `Calculator` is instantiated, not lazily.
 
-**Circular dependencies fail at construction time.** The DAG is validated when
-`Calculator` is instantiated, not lazily. Bad measure definitions are caught immediately.
-
-**DuckDB is opt-in and transparent.** Passing `connection` and `table` to `Calculator`
-enables the SQL path for breakdowns. Removing them falls back to the Python path
-with no other changes required. `build_table` always uses the Python path regardless
-of whether a connection is present — SQL offers no advantage for summary tables with
-no GROUP BY dimension.
+**The Python resolver is optional.**  Provide one if you want the library to
+work without a DuckDB connection (e.g. unit tests, offline environments).

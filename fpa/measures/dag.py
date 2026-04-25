@@ -43,12 +43,14 @@ class MeasureDAG:
                 "Measures cannot depend on each other in a cycle."
             )
 
+        self._order: List[str] = list(nx.topological_sort(self._graph))
+
     def evaluation_order(self) -> List[str]:
         """
         Return measure names in the order they must be calculated.
         Dependencies always come before the measures that use them.
         """
-        return list(nx.topological_sort(self._graph))
+        return self._order
 
     def dependencies_of(self, measure_name: str) -> List[str]:
         """Return all measures that `measure_name` directly depends on."""

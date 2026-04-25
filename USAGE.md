@@ -1,8 +1,8 @@
 # FPA Library — Usage Guide
 
-A Python library for resolving financial measures across time periods and scenarios.
-It handles fiscal calendars, measure dependencies, scenario awareness, memoization,
-and optional DuckDB-accelerated breakdowns.
+A DuckDB-centric Python library for resolving financial measures across time
+periods and scenarios.  Base measures are defined as SQL filter queries; the
+engine handles date filtering, scenario filtering, and GROUP BY automatically.
 
 For concepts and design rationale, see [OVERVIEW.md](OVERVIEW.md).
 For a terse AI-facing reference, see [AI_CONTEXT.md](AI_CONTEXT.md).
@@ -13,6 +13,7 @@ For a terse AI-facing reference, see [AI_CONTEXT.md](AI_CONTEXT.md).
 
 ```bash
 pip install git+https://github.com/you/fpa.git
+pip install duckdb
 ```
 
 Core dependencies (auto-installed):
@@ -22,18 +23,16 @@ python-dateutil
 networkx
 ```
 
-DuckDB is optional — required only for the SQL execution path:
-```bash
-pip install duckdb
-```
-
 ---
 
 ## Quickstart
 
 ```python
 import fpa
+import duckdb
 from datetime import date
+
+con = duckdb.connect("warehouse.duckdb")
 
 # 1. Configure the fiscal calendar
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
@@ -43,17 +42,17 @@ registry = fpa.MeasureRegistry()
 registry.register_many([
     fpa.BaseMeasure(
         name="Revenue",
-        resolver=lambda ctx: my_db.sum(
-            accounts=["4000"], start=ctx.period.start,
-            end=ctx.period.end, scenario=ctx.scenario,
-        ),
+        sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+        value_col="amount",
+        date_col="period_enddate",
+        agg_type=fpa.AggType.SUM,
     ),
     fpa.BaseMeasure(
         name="COGS",
-        resolver=lambda ctx: my_db.sum(
-            accounts=["5000"], start=ctx.period.start,
-            end=ctx.period.end, scenario=ctx.scenario,
-        ),
+        sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
+        value_col="amount",
+        date_col="period_enddate",
+        agg_type=fpa.AggType.SUM,
     ),
     fpa.Measure(
         name="Gross Profit",
@@ -68,7 +67,7 @@ registry.register_many([
 ])
 
 # 3. Build the calculator and request a P&L table
-calc = fpa.Calculator(registry)
+calc = fpa.Calculator(registry, connection=con)
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
 table = calc.build_table(
@@ -77,11 +76,11 @@ table = calc.build_table(
     scenario="Actual",
 )
 # Returns a pandas DataFrame:
-#                Jan 2024   Feb 2024   ...   Dec 2024
-# Revenue         850,000    920,000          1,100,000
-# COGS            340,000    368,000            440,000
-# Gross Profit    510,000    552,000            660,000
-# Gross Margin %     60.0       60.0               60.0
+#                  Jan 2024   Feb 2024   ...   Dec 2024
+# Revenue           850,000    920,000          1,100,000
+# COGS              340,000    368,000            440,000
+# Gross Profit      510,000    552,000            660,000
+# Gross Margin %       60.0       60.0               60.0
 ```
 
 ---
@@ -97,32 +96,25 @@ calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 # Fiscal year starting in July, labelled by the year it ends
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=7, year_label_convention="ending")
 # Jul 2024 – Jun 2025 is labelled "FY2025"
-
-# Fiscal year starting in October, labelled by the year it starts
-calendar = fpa.FiscalCalendar(fiscal_year_start_month=10, year_label_convention="starting")
-# Oct 2024 – Sep 2025 is labelled "FY2024"
 ```
 
 ### Getting a single period
 
 ```python
-jan   = calendar.month_period(date(2024, 1, 15))   # → Period("Jan 2024")
-q1    = calendar.quarter_period(date(2024, 1, 15)) # → Period("FY2024 Q1")
-fy    = calendar.year_period(date(2024, 1, 15))    # → Period("FY2024")
+jan = calendar.month_period(date(2024, 1, 15))    # → Period("Jan 2024")
+q1  = calendar.quarter_period(date(2024, 1, 15))  # → Period("FY2024 Q1")
+fy  = calendar.year_period(date(2024, 1, 15))     # → Period("FY2024")
 
-# Dispatch by grain enum
 p = calendar.period_for(date(2024, 1, 15), fpa.Grain.MONTH)
 ```
 
 ### Getting ranges
 
 ```python
-# All months from Jan 1 through Dec 31 (inclusive of any period that overlaps)
-months   = calendar.month_range(date(2024, 1, 1), date(2024, 12, 31))   # 12 months
-quarters = calendar.quarter_range(date(2024, 1, 1), date(2024, 12, 31)) # 4 quarters
+months   = calendar.month_range(date(2024, 1, 1), date(2024, 12, 31))
+quarters = calendar.quarter_range(date(2024, 1, 1), date(2024, 12, 31))
 
-# All periods in a complete fiscal year
-months   = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)    # List[Period], 12 items
+months   = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)    # 12 items
 quarters = calendar.periods_for_fiscal_year(2024, fpa.Grain.QUARTER)  # 4 items
 year     = calendar.periods_for_fiscal_year(2024, fpa.Grain.YEAR)     # [FY2024]
 ```
@@ -130,62 +122,78 @@ year     = calendar.periods_for_fiscal_year(2024, fpa.Grain.YEAR)     # [FY2024]
 ### Navigating from a period
 
 ```python
-prior_month   = calendar.prior_period(jan)         # Dec 2023
-prior_q       = calendar.prior_period(q1)          # FY2023 Q4
-prior_year    = calendar.prior_year_period(jan)    # Jan 2023 (same grain, one FY back)
-ytd           = calendar.ytd_periods(march)        # [Jan, Feb, Mar 2024]
-rolling_12    = calendar.rolling_periods(aug, 12)  # Sep 2023 – Aug 2024
+prior_month = calendar.prior_period(jan)
+prior_year  = calendar.prior_year_period(jan)
+ytd         = calendar.ytd_periods(march)      # [Jan, Feb, Mar 2024]
+rolling_12  = calendar.rolling_periods(aug, 12)
 ```
 
 ### Period attributes
 
 ```python
-period.start             # date — first day of the period (inclusive)
-period.end               # date — last day of the period (inclusive)
-period.label             # str  — "Jan 2024", "FY2024 Q1", "FY2024"
-period.grain             # Grain.MONTH | Grain.QUARTER | Grain.YEAR
-period.fiscal_year       # int  — e.g. 2024
-period.fiscal_period_num # int  — month: 1-12, quarter: 1-4, year: always 1
-period.calendar_year     # int  — period.start.year
-period.calendar_month    # int  — period.start.month
+period.start             # date — first day (inclusive)
+period.end               # date — last day (inclusive)
+period.label             # "Jan 2024", "FY2024 Q1", "FY2024"
+period.grain             # Grain.MONTH | QUARTER | YEAR
+period.fiscal_year       # int — e.g. 2024
+period.fiscal_period_num # int — month: 1-12, quarter: 1-4, year: 1
+period.calendar_year     # int
+period.calendar_month    # int
 ```
 
 ---
 
 ## Measures
 
-### BaseMeasure — data from your source
+### BaseMeasure — data from DuckDB
 
 ```python
 fpa.BaseMeasure(
-    name="Revenue",                    # str, unique in the registry
-    resolver=my_callable,              # Callable(CalculationContext) -> float | None
-    agg_type=fpa.AggType.SUM,         # default: SUM — metadata only, not enforced
-    tags=["income_statement"],         # List[str], default []
-    description="Total product revenue from account 4000",
-    sql_expr="SUM(CASE WHEN account_id = '4000' "
-             "AND date BETWEEN '{start}' AND '{end}' THEN amount ELSE 0 END)",
-    # sql_expr is optional — enables the DuckDB execution path for breakdowns
+    name="Revenue",
+    sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+    value_col="amount",           # column to aggregate
+    date_col="period_enddate",    # column for date-range filtering
+    agg_type=fpa.AggType.SUM,    # how value_col is aggregated per period
+    tags=["income_statement"],
+    description="Total product revenue",
 )
 ```
 
-**resolver** receives a `CalculationContext` and must return a `float` (or `None`,
-which is treated as `0.0`). Exceptions are caught and re-raised as `RuntimeError`
-with the measure name included.
+**sql** is your business-logic filter.  Use `SELECT *` so all dimension
+columns (entity, department, account_id, …) are available for GROUP BY.  Do
+NOT include WHERE conditions for date range, scenario, or dimension values —
+those are appended by the engine automatically.  Trailing semicolons are
+stripped automatically.
 
-**sql_expr** is a SQL fragment with `{start}` and `{end}` placeholders. When the
-DuckDB path is active, this replaces the resolver. The expression should aggregate to
-a single float per group — typically `SUM(CASE WHEN ... THEN amount ELSE 0 END)`.
-Leave blank to always use the resolver.
+**value_col** is the numeric column to aggregate.  Required when `sql` is set.
+
+**date_col** is the date column used for period filtering.  Defaults to the
+Calculator's `date_col` argument if not set on the measure.  If `date_col`
+does not match an actual column in the query result, the `FILTER` clause
+matches no rows and every cell silently returns 0.  Always verify the column
+name against your table schema.
+
+**agg_type** controls the SQL aggregation function:
+
+| AggType | SQL | Use for |
+|---|---|---|
+| `SUM` | `COALESCE(SUM(value_col) FILTER (WHERE …), 0)` | Revenue, Expenses |
+| `AVERAGE` | `COALESCE(AVG(value_col) FILTER (WHERE …), 0)` | Average Price |
+| `LAST_DAY` | `arg_max(value_col, date_col) FILTER (WHERE …)` | Headcount, ARR, Balance |
+| `CALCULATED` | not valid for BaseMeasure | — |
+
+**resolver** is an optional Python callable `(CalculationContext) → float`.
+Provide one if you need the library to work without a DuckDB connection (e.g.
+unit tests, offline environments).  Return `None` to treat the value as 0.0.
 
 ### Measure — calculated from other measures
 
 ```python
 fpa.Measure(
     name="Gross Profit",
-    dependencies=["Revenue", "COGS"],           # List[str], at least one required
-    formula=lambda v: v["Revenue"] - v["COGS"], # Callable(dict[str, float]) -> float
-    agg_type=fpa.AggType.CALCULATED,            # default: CALCULATED
+    dependencies=["Revenue", "COGS"],
+    formula=lambda v: v["Revenue"] - v["COGS"],
+    agg_type=fpa.AggType.CALCULATED,  # default
     tags=["income_statement"],
     description="Revenue minus cost of goods sold",
 )
@@ -193,25 +201,30 @@ fpa.Measure(
 
 **formula** receives `{measure_name: float}` for every declared dependency.
 Dependencies are resolved before the formula is called, in topological order.
-Circular dependencies raise `ValueError` when `Calculator` is instantiated.
 
 **Python conditional formulas** work naturally:
 ```python
 formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100) if v["Revenue"] else 0.0
 ```
-On the DuckDB path, the library attempts vectorized pandas arithmetic first and falls
-back to row-wise `.apply()` automatically for formulas that cannot be vectorized.
+On the DuckDB path, the library attempts vectorized pandas arithmetic first
+and falls back to row-wise `.apply()` automatically for formulas that cannot
+be vectorized.
 
-### AggType
+### Headcount (AggType.LAST_DAY)
 
-Metadata for the reporting layer — the library does not use it to aggregate.
+```python
+fpa.BaseMeasure(
+    name="Headcount",
+    sql="SELECT * FROM hr_snapshots WHERE status = 'Active'",
+    value_col="employee_count",
+    date_col="snapshot_date",
+    agg_type=fpa.AggType.LAST_DAY,
+)
+```
 
-| AggType | Meaning | Examples |
-|---|---|---|
-| `SUM` | Flow — accumulates over the period | Revenue, Expenses, Bookings |
-| `LAST_DAY` | Stock — point-in-time at period end | Headcount, ARR, Cash Balance |
-| `AVERAGE` | Rate — average over the period | Average Order Value, Average Price |
-| `CALCULATED` | Ratio — must be recalculated, not summed | Gross Margin %, Growth Rate |
+`arg_max(employee_count, snapshot_date)` returns the headcount from the row
+with the latest `snapshot_date` within the period — the correct period-end
+snapshot for stock measures.
 
 ---
 
@@ -219,58 +232,37 @@ Metadata for the reporting layer — the library does not use it to aggregate.
 
 ```python
 registry = fpa.MeasureRegistry()
+registry.register(revenue)                   # one measure
+registry.register_many([rev, cogs, gp, gm])  # many at once
 
-# Register one measure (raises ValueError on duplicate name)
-registry.register(revenue)
+measure = registry.get("Revenue")            # → BaseMeasure or Measure (KeyError if missing)
+names   = registry.names()                   # → List[str]
+bases   = registry.base_measures()           # → List[BaseMeasure]
+derived = registry.derived_measures()        # → List[Measure]
+tagged  = registry.by_tag("income_statement")# → List[AnyMeasure]
 
-# Register many at once
-registry.register_many([revenue, cogs, gross_profit, gross_margin])
-
-# Retrieve
-measure = registry.get("Revenue")           # → BaseMeasure or Measure (KeyError if missing)
-
-# Query
-names   = registry.names()                  # → List[str]
-bases   = registry.base_measures()          # → List[BaseMeasure]
-derived = registry.derived_measures()       # → List[Measure]
-tagged  = registry.by_tag("income_statement") # → List[BaseMeasure | Measure]
-
-# Membership
-"Revenue" in registry                       # → bool
-len(registry)                               # → int
+"Revenue" in registry                        # → bool
+len(registry)                                # → int
 ```
 
 ---
 
 ## Calculator
 
-### Python path (no DuckDB)
-
-```python
-calc = fpa.Calculator(registry)
-```
-
-### DuckDB path (fast breakdowns)
-
 ```python
 import duckdb
 
-con = duckdb.connect("warehouse.duckdb")     # or duckdb.connect() for in-memory
+con = duckdb.connect("warehouse.duckdb")
 
 calc = fpa.Calculator(
     registry,
-    connection=con,        # open duckdb.Connection
-    table="gl",            # table name in DuckDB
-    date_col="date",       # default "date"
-    scenario_col="scenario",  # default "scenario"
+    connection=con,          # open duckdb.DuckDBPyConnection
+    date_col="date",         # default date column (overridden per-measure by BaseMeasure.date_col)
+    scenario_col="scenario", # default "scenario"
 )
 ```
 
-`build_table` always uses the Python resolver path regardless — SQL has no throughput
-advantage for summary tables with no GROUP BY dimension. `build_breakdown_table` uses
-DuckDB when a connection, table, and at least one `sql_expr` are available.
-
-### Resolve a single value
+### Resolve a single value (Python path)
 
 ```python
 ctx = fpa.CalculationContext.make(
@@ -280,7 +272,9 @@ ctx = fpa.CalculationContext.make(
 value = calc.resolve("Revenue", ctx)   # → float (memoized)
 ```
 
-### Resolve multiple measures for one context
+Requires `resolver` on BaseMeasure.
+
+### Resolve multiple measures (Python path)
 
 ```python
 values = calc.resolve_many(["Revenue", "COGS", "Gross Profit"], ctx)
@@ -290,7 +284,9 @@ values = calc.resolve_many(["Revenue", "COGS", "Gross Profit"], ctx)
 ### build_table — measures × periods
 
 Returns a `pd.DataFrame` with measures as rows and period labels as columns.
-Always uses the Python resolver path.
+
+Uses the DuckDB path when a connection is present.  One SQL query per base
+measure; derived measures computed in pandas.
 
 ```python
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
@@ -299,40 +295,43 @@ table = calc.build_table(
     measure_names=["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
     periods=months,
     scenario="Actual",
-    entity="North",       # optional — forwarded to every resolver
-    department="Sales",
+    entity="North",     # optional fixed filters applied to every query
 )
-# table.loc["Revenue", "Jan 2024"]   → float
-# table.loc["Gross Margin %", "Q1"]  → float (if quarters were used)
+# table.loc["Revenue", "Jan 2024"]  → float
 ```
 
 ### build_breakdown_table — dimension values × periods
 
-Returns a `pd.DataFrame` with dimension values as rows and period labels as columns.
-Uses DuckDB when available; falls back to Python otherwise.
+Returns a `pd.DataFrame` with dimension values as rows and period labels as
+columns.
 
 ```python
-entities = ["North", "South", "West"]
-
+# With explicit dimension_values — results filtered to those values
 breakdown = calc.build_breakdown_table(
-    measure_name="Revenue",
+    measure_name="Gross Profit",
     periods=months,
     scenario="Actual",
-    dimension="entity",
-    dimension_values=entities,
-    # optional fixed filters applied to every cell:
-    department="Sales",
+    dimension="department",
+    dimension_values=["Engineering", "Sales", "Marketing"],
 )
-# breakdown.loc["North", "Jan 2024"]  → float
-# breakdown.loc["South", "Feb 2024"]  → float
 
+# Without dimension_values — returns every group DuckDB finds
+# Safe for high-cardinality dimensions (100K+ distinct values)
+breakdown = calc.build_breakdown_table(
+    measure_name="Gross Profit",
+    periods=months,
+    scenario="Actual",
+    dimension="customer_id",
+    # dimension_values omitted
+)
+
+# breakdown.loc["Engineering", "Jan 2024"]  → float
 # Missing dimension values return 0.0 — no KeyError
 ```
 
-Supported measure types in breakdown:
-- A base measure directly (`"Revenue"`)
-- Any derived measure — dependencies are resolved automatically (`"Gross Profit"`,
-  `"Gross Margin %"`)
+Supported measure types: any base or derived measure.  Pass `"Gross Margin %"`
+and the engine traces the DAG, fetches Revenue and COGS via SQL, then
+computes Gross Profit and Gross Margin % per dimension group.
 
 ### Scenario comparison
 
@@ -353,91 +352,101 @@ calc.clear_cache()   # call after underlying data changes
 
 ## CalculationContext
 
-Frozen dataclass (hashable) — the single interface between the engine and resolvers.
+Frozen dataclass (hashable) — the single interface between the engine and
+resolvers on the Python path.
 
 ```python
-# Preferred constructor
 ctx = fpa.CalculationContext.make(
     period=calendar.month_period(date(2024, 3, 1)),
     scenario="Budget",
-    entity="North",        # any keyword args become filters
+    entity="North",       # any keyword args become filters
     department="Sales",
-    customer_id=42,
 )
 
 # Inside a resolver
 ctx.period    # Period object
 ctx.scenario  # str
-ctx.get("entity")      # → "North" (or None if not set)
-ctx.get("customer_id") # → 42
-ctx.get("missing")     # → None
-ctx.get("missing", 0)  # → 0  (with default)
-ctx.filters   # tuple of sorted (key, value) pairs — prefer .get()
+ctx.get("entity")      # → "North"  (None if not set)
+ctx.get("missing", 0)  # → 0
+ctx.filters            # tuple of sorted (key, value) pairs — use .get()
 ```
 
 ---
 
-## Resolver Patterns
+## Generated SQL
 
-### Flow measure — sum transactions within the period
+For a `build_breakdown_table("Revenue", months, scenario="Actual", dimension="department")` call,
+the engine executes one query per base measure in the dependency chain.  For Revenue:
+
+```sql
+SELECT "department",
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
+    ...
+FROM (SELECT * FROM general_ledger WHERE account_type = 'Income') __base
+WHERE "scenario" = ?
+GROUP BY "department"
+```
+
+For LAST_DAY (headcount):
+
+```sql
+SELECT "department",
+    arg_max(employee_count, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024-01-01' AND '2024-01-31') AS "Jan 2024",
+    ...
+FROM (SELECT * FROM hr_snapshots WHERE status = 'Active') __base
+WHERE "scenario" = ?
+GROUP BY "department"
+```
+
+Period start/end dates are embedded as ISO literals (they come from
+`FiscalCalendar` — not user input).  Scenario, filter values, and dimension
+values are always parameterized (`?`).
+
+---
+
+## Python Resolver Patterns
+
+Provide a `resolver` alongside `sql` if you need the library to work without
+a DuckDB connection.
+
+### Flow measure
 
 ```python
 def query_revenue(ctx):
-    entity = ctx.get("entity")
-    sql = """
-        SELECT COALESCE(SUM(amount), 0)
-        FROM gl
-        WHERE account_id IN ('4000', '4010')
-          AND scenario = ?
-          AND date BETWEEN ? AND ?
-    """
-    params = [ctx.scenario, ctx.period.start, ctx.period.end]
-    if entity:
-        sql += " AND entity = ?"
-        params.append(entity)
-    return float(db.execute(sql, params).scalar())
-```
-
-### Stock measure — cumulative through period end
-
-Balance sheet accounts and headcount accumulate over all history; don't filter by
-period start.
-
-```python
-def query_total_assets(ctx):
     return float(db.execute("""
-        SELECT COALESCE(SUM(amount), 0) FROM gl
-        WHERE account_id IN ('1000', '1010', '1020')
+        SELECT COALESCE(SUM(amount), 0) FROM general_ledger
+        WHERE account_type = 'Income'
           AND scenario = ?
-          AND date <= ?
-    """, [ctx.scenario, ctx.period.end]).scalar())
+          AND period_enddate BETWEEN ? AND ?
+    """, [ctx.scenario, ctx.period.start, ctx.period.end]).scalar())
+
+fpa.BaseMeasure(
+    name="Revenue",
+    sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+    value_col="amount",
+    date_col="period_enddate",
+    resolver=query_revenue,
+)
 ```
 
-### Headcount (active employees at period end)
+### Resolver-only (no sql — Python path only)
 
 ```python
-def query_headcount(ctx):
-    entity = ctx.get("entity")
-    mask = (
-        (employees["start_date"] <= ctx.period.end) &
-        (employees["end_date"].isna() | (employees["end_date"] >= ctx.period.start))
-    )
-    if entity:
-        mask &= employees["entity"] == entity
-    return float(mask.sum())
+fpa.BaseMeasure(
+    name="Revenue",
+    resolver=lambda ctx: lookup[(ctx.scenario, ctx.get("entity"), ctx.period.label)],
+)
 ```
 
 ### Prior period reference
 
-Call back into the calculator. Results are memoized, so there is no redundant work.
-
 ```python
-# Wire calc into the resolver at definition time
 def query_mom_growth(ctx):
     prior_ctx = fpa.CalculationContext.make(
         period=calendar.prior_period(ctx.period),
         scenario=ctx.scenario,
-        **dict(ctx.filters),   # carry all filters through
+        **dict(ctx.filters),
     )
     current = calc.resolve("Revenue", ctx)
     prior   = calc.resolve("Revenue", prior_ctx)
@@ -446,208 +455,23 @@ def query_mom_growth(ctx):
 registry.register(fpa.BaseMeasure(name="MoM Growth %", resolver=query_mom_growth))
 ```
 
-### YTD measure
-
-```python
-def query_revenue_ytd(ctx):
-    fy_start = calendar._fiscal_year_start_date(ctx.period.fiscal_year)
-    return float(db.execute("""
-        SELECT COALESCE(SUM(amount), 0) FROM gl
-        WHERE account_id IN ('4000', '4010')
-          AND scenario = ?
-          AND date BETWEEN ? AND ?
-    """, [ctx.scenario, fy_start, ctx.period.end]).scalar())
-```
-
-### Multi-scenario resolver
-
-```python
-SCENARIO_TABLES = {"Actual": "gl_actual", "Budget": "gl_budget", "Forecast": "gl_forecast"}
-
-def query_revenue(ctx):
-    table = SCENARIO_TABLES.get(ctx.scenario, "gl_actual")
-    return float(db.execute(
-        f"SELECT COALESCE(SUM(amount), 0) FROM {table} WHERE account_id = '4000'"
-        f" AND date BETWEEN ? AND ?",
-        [ctx.period.start, ctx.period.end]
-    ).scalar())
-```
-
 ---
 
-## Performance — Pre-load Data Once
-
-`build_table` fires one resolver call per `(measure, period)` cell. If each resolver
-call makes a live database query, a 5-measure × 12-month P&L fires up to 60 queries.
-The solution is to pre-load all the data you need into a dict before building the table,
-then have each resolver slice the in-memory dict.
-
-```python
-from collections import defaultdict
-
-# Load once — one query for all accounts, all months
-rows = db.execute("""
-    SELECT scenario, account_id, entity,
-           strftime('%Y-%m', date) AS month,
-           SUM(amount) AS amount
-    FROM gl
-    WHERE scenario IN ('Actual', 'Budget')
-      AND date BETWEEN '2024-01-01' AND '2024-12-31'
-    GROUP BY scenario, account_id, entity, month
-""").fetchall()
-
-lookup = defaultdict(float)
-for scenario, account_id, entity, month, amount in rows:
-    lookup[(scenario, account_id, entity, month)] = amount
-
-# Resolver slices the dict — zero database calls
-def query_revenue(ctx):
-    month = ctx.period.start.strftime("%Y-%m")
-    entity = ctx.get("entity")
-    accts = ["4000", "4010"]
-    if entity:
-        return sum(lookup[(ctx.scenario, a, entity, month)] for a in accts)
-    # Sum across all entities
-    return sum(
-        v for (s, a, e, m), v in lookup.items()
-        if s == ctx.scenario and a in accts and m == month
-    )
-```
-
-With this pattern, `build_table` is effectively free — dict lookups are ~10M/sec.
-
----
-
-## DuckDB Integration
-
-### When to use it
-
-`build_breakdown_table` with DuckDB excels when:
-- You have many dimension values (50+ customers, regions, departments)
-- Across many periods (12+ months)
-- And the data lives in DuckDB (or a Parquet/CSV file DuckDB can scan)
-
-At 10M rows × 50K dimension values × 60 periods, the DuckDB path is ~7× faster than
-the pre-loaded dict approach and ~300× faster than live-query-per-cell.
-
-`build_table` (no dimension, just measures × periods) always uses the Python path
-regardless of whether DuckDB is configured. SQL has no advantage there.
-
-### Setup
-
-```python
-import duckdb
-import fpa
-
-con = duckdb.connect("warehouse.duckdb")  # or an in-memory connection
-
-registry = fpa.MeasureRegistry()
-registry.register_many([
-    fpa.BaseMeasure(
-        name="Revenue",
-        resolver=lambda ctx: 0.0,   # required — used by build_table and as fallback
-        sql_expr=(
-            "SUM(CASE WHEN account_id IN ('4000', '4010') "
-            "AND date BETWEEN '{start}' AND '{end}' THEN amount ELSE 0 END)"
-        ),
-    ),
-    fpa.BaseMeasure(
-        name="COGS",
-        resolver=lambda ctx: 0.0,
-        sql_expr=(
-            "SUM(CASE WHEN account_id = '5000' "
-            "AND date BETWEEN '{start}' AND '{end}' THEN amount ELSE 0 END)"
-        ),
-    ),
-    fpa.Measure(
-        name="Gross Profit",
-        dependencies=["Revenue", "COGS"],
-        formula=lambda v: v["Revenue"] - v["COGS"],
-    ),
-    fpa.Measure(
-        name="Gross Margin %",
-        dependencies=["Gross Profit", "Revenue"],
-        formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100) if v["Revenue"] else 0.0,
-    ),
-])
-
-calc = fpa.Calculator(registry, connection=con, table="gl")
-```
-
-### How it works
-
-```python
-# This fires one SQL query covering all dimension values × all periods:
-breakdown = calc.build_breakdown_table(
-    "Gross Margin %",
-    months,
-    scenario="Actual",
-    dimension="entity",
-    dimension_values=["North", "South", "West", "East"],
-)
-```
-
-The generated SQL looks like:
-
-```sql
-SELECT entity,
-       SUM(CASE WHEN account_id IN ('4000','4010') AND date BETWEEN '2024-01-01' AND '2024-01-31' THEN amount ELSE 0 END) AS "Jan 2024|Revenue",
-       SUM(CASE WHEN account_id = '5000'           AND date BETWEEN '2024-01-01' AND '2024-01-31' THEN amount ELSE 0 END) AS "Jan 2024|COGS",
-       SUM(CASE WHEN account_id IN ('4000','4010') AND date BETWEEN '2024-02-01' AND '2024-02-29' THEN amount ELSE 0 END) AS "Feb 2024|Revenue",
-       SUM(CASE WHEN account_id = '5000'           AND date BETWEEN '2024-02-01' AND '2024-02-29' THEN amount ELSE 0 END) AS "Feb 2024|COGS",
-       ...
-FROM gl
-WHERE scenario = 'Actual' AND entity IN ('North', 'South', 'West', 'East')
-GROUP BY entity
-```
-
-Derived measures (`Gross Profit`, `Gross Margin %`) are then computed as vectorized
-pandas operations on the resulting DataFrame.
-
-### Mixed SQL and Python base measures
-
-Base measures without `sql_expr` are filled via their Python resolver after the SQL
-query returns. This lets you mix DuckDB-sourced and Python-computed base measures in
-the same breakdown.
-
-```python
-# This base measure has no sql_expr — filled via resolver per cell
-fpa.BaseMeasure(
-    name="Manual Adjustment",
-    resolver=lambda ctx: adjustments.get((ctx.get("entity"), ctx.period.label), 0.0),
-    # no sql_expr
-)
-
-fpa.Measure(
-    name="Adjusted Revenue",
-    dependencies=["Revenue", "Manual Adjustment"],
-    formula=lambda v: v["Revenue"] + v["Manual Adjustment"],
-)
-
-# build_breakdown_table: Revenue via SQL, Adjustment via Python, Adjusted Revenue computed
-tbl = calc.build_breakdown_table("Adjusted Revenue", months, scenario="Actual",
-                                  dimension="entity", dimension_values=entities)
-```
-
-### Fallback behavior
+## Fallback Rules
 
 | Condition | Path used |
 |---|---|
-| No `connection` passed to `Calculator` | Python resolver |
-| `connection` set, but no `sql_expr` on any required base measure | Python resolver |
-| `connection` set, at least one base measure has `sql_expr` | DuckDB |
-
-The fallback is automatic and silent — no configuration needed.
+| No `connection` on Calculator | Python resolver |
+| `connection` set, no base measure in chain has `sql` | Python resolver |
+| `connection` set, at least one base measure has `sql` | DuckDB |
+| Base measure has both `sql` and `resolver` | DuckDB (sql wins with connection) |
 
 ---
 
 ## What This Library Does NOT Do
 
-- Connect to databases or execute queries (on the Python path — that's the resolver's job)
-- Cache source data between runs (only computed values are memoized)
-- Aggregate across grains automatically (resolvers handle their own date ranges)
-- Enumerate dimension values for breakdowns (the caller provides them)
+- Connect to databases on the Python path — that's the resolver's job
+- Cache source data between runs — only computed values are memoized
+- Aggregate across grains — `period.start` / `period.end` define the range
 - Produce reports, charts, or exports
 - Handle forecasting, driver-based projections, or statistical models
-
-These belong in a layer built on top of this library.

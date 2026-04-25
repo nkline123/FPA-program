@@ -18,7 +18,17 @@
       "Bash(dir /b fpa)",
       "Bash(dir /b fpa\\\\engine)",
       "Bash(dir /b fpa\\\\measures)",
-      "Bash(dir /b tests)"
+      "Bash(dir /b tests)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_calculator.py::TestCalculatorDuckDB -v)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_issues.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -q)",
+      "Bash(.venv/Scripts/python.exe smoke_test.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_calculator.py -k \"scenario\" -v)",
+      "Bash(.venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

@@ -1,17 +1,19 @@
 # FPA — Financial Planning & Analysis Library
 
-A Python library for resolving financial measures across time periods and scenarios.
+A DuckDB-centric Python library for resolving financial measures across time
+periods and scenarios.
 
-It handles fiscal calendars, measure dependency graphs, scenario awareness, dimensional
-filtering, memoization, and — when DuckDB is available — high-throughput SQL execution
-for dimension breakdowns. Data access for the Python path is left entirely to the caller
-via resolver callables.
+Base measures are defined as SQL filter queries.  The engine wraps them as
+subqueries, appends date / scenario / dimension filters automatically, and
+executes one query per base measure — enabling high-cardinality GROUP BY
+breakdowns without parameter-list explosion.  Derived measures (ratios,
+subtotals) are computed as vectorized pandas operations on the query result.
 
 ## Documentation
 
 | File | What's in it |
 |---|---|
-| [OVERVIEW.md](OVERVIEW.md) | Concepts, design philosophy, when to use each feature |
+| [OVERVIEW.md](OVERVIEW.md) | Concepts, design philosophy, execution paths |
 | [USAGE.md](USAGE.md) | Full API reference with examples |
 | [AI_CONTEXT.md](AI_CONTEXT.md) | Terse reference for AI assistants and code generation |
 | [smoke_test.py](smoke_test.py) | Working end-to-end example with sample data |
@@ -20,6 +22,7 @@ via resolver callables.
 
 ```bash
 pip install git+https://github.com/you/fpa.git
+pip install duckdb
 ```
 
 Core dependencies (installed automatically):
@@ -30,33 +33,31 @@ python-dateutil
 networkx
 ```
 
-DuckDB is optional — only needed for the high-throughput SQL path:
-
-```bash
-pip install duckdb
-```
-
 ## Quickstart
 
 ```python
 import fpa
-from datetime import date
+import duckdb
 
-# 1. Fiscal calendar
+con = duckdb.connect("warehouse.duckdb")
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 
-# 2. Define measures
+# Define measures as SQL filter queries
 registry = fpa.MeasureRegistry()
 registry.register_many([
     fpa.BaseMeasure(
         name="Revenue",
-        resolver=lambda ctx: my_db.sum(accounts=["4000"], start=ctx.period.start,
-                                        end=ctx.period.end, scenario=ctx.scenario),
+        sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+        value_col="amount",
+        date_col="period_enddate",
+        agg_type=fpa.AggType.SUM,
     ),
     fpa.BaseMeasure(
         name="COGS",
-        resolver=lambda ctx: my_db.sum(accounts=["5000"], start=ctx.period.start,
-                                        end=ctx.period.end, scenario=ctx.scenario),
+        sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
+        value_col="amount",
+        date_col="period_enddate",
+        agg_type=fpa.AggType.SUM,
     ),
     fpa.Measure(
         name="Gross Profit",
@@ -70,56 +71,51 @@ registry.register_many([
     ),
 ])
 
-# 3. Calculate
-calc = fpa.Calculator(registry)
+calc = fpa.Calculator(registry, connection=con)
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
 # P&L table — measures as rows, months as columns
+# Runs via DuckDB: one query per base measure, all periods in one scan
 table = calc.build_table(
     ["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
     months,
     scenario="Actual",
 )
-print(table)
-```
 
-## With DuckDB (fast dimension breakdowns)
-
-Add `sql_expr` to your base measures and pass a connection at construction:
-
-```python
-import duckdb
-
-con = duckdb.connect("warehouse.duckdb")
-
-registry.register_many([
-    fpa.BaseMeasure(
-        name="Revenue",
-        resolver=lambda ctx: 0.0,   # fallback — used by build_table
-        sql_expr="SUM(CASE WHEN account_id IN ('4000') AND date BETWEEN '{start}' AND '{end}' THEN amount ELSE 0 END)",
-    ),
-    ...
-])
-
-calc = fpa.Calculator(registry, connection=con, table="gl")
-
-# build_breakdown_table uses one SQL query for all periods × dimension values
-by_region = calc.build_breakdown_table(
-    "Gross Profit",
+# Dimension breakdown — one query per base measure, GROUP BY dimension
+# Omit dimension_values to return every group in the data (no IN clause —
+# safe for high-cardinality dimensions with 100K+ distinct values)
+by_dept = calc.build_breakdown_table(
+    "Gross Margin %",
     months,
     scenario="Actual",
-    dimension="entity",
-    dimension_values=["North", "South", "West"],
+    dimension="department",
 )
 ```
 
-See [USAGE.md](USAGE.md) for the full DuckDB API and resolver patterns.
+## How it works
+
+For each `BaseMeasure`, the engine generates SQL like this — one query
+covers all periods via `FILTER (WHERE date_col BETWEEN … AND …)`:
+
+```sql
+SELECT department,
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
+    ...
+FROM (SELECT * FROM general_ledger WHERE account_type = 'Income') __base
+WHERE scenario = ?
+GROUP BY department
+```
+
+DuckDB's columnar `GROUP BY` handles 100K+ distinct dimension values natively —
+no IN-clause explosion, no Python loop over dimension values.
+
+Derived measures (`Gross Profit`, `Gross Margin %`) are computed as vectorized
+pandas operations on the returned DataFrame.
 
 ## Running Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
-
-142 tests covering the calendar, measures, DAG, registry, Python resolver path, and
-DuckDB execution path.

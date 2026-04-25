@@ -1,27 +1,64 @@
 """
 FPA — Financial Planning & Analysis library.
 
-A calculation engine for financial metrics across time periods and scenarios.
-Data access is handled by the caller via resolver callables on BaseMeasure.
+A DuckDB-centric calculation engine for financial metrics across time periods
+and scenarios.  Base measures are defined as SQL filter queries; the engine
+wraps them as subqueries, appends date / scenario / dimension filters
+automatically, and executes one query per base measure per call — enabling
+high-cardinality GROUP BY breakdowns without parameter-list explosion.
 
     import fpa
+    import duckdb
 
+    con = duckdb.connect("warehouse.duckdb")
     calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
+
     registry = fpa.MeasureRegistry()
     registry.register_many([
         fpa.BaseMeasure(
             name="Revenue",
-            resolver=lambda ctx: my_db.get_revenue(ctx.period.start, ctx.period.end, ctx.scenario),
+            sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+            value_col="amount",
+            date_col="period_enddate",
+            agg_type=fpa.AggType.SUM,
+        ),
+        fpa.BaseMeasure(
+            name="COGS",
+            sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
+            value_col="amount",
+            date_col="period_enddate",
+            agg_type=fpa.AggType.SUM,
         ),
         fpa.Measure(
             name="Gross Profit",
             dependencies=["Revenue", "COGS"],
             formula=lambda v: v["Revenue"] - v["COGS"],
         ),
+        fpa.Measure(
+            name="Gross Margin %",
+            dependencies=["Gross Profit", "Revenue"],
+            formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100)
+                              if v["Revenue"] else 0.0,
+        ),
     ])
-    calc = fpa.Calculator(registry)
+
+    calc = fpa.Calculator(registry, connection=con)
     periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
-    table = calc.build_table(["Revenue", "Gross Profit"], periods, scenario="Actual")
+
+    # P&L table — measures as rows, months as columns
+    table = calc.build_table(
+        ["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
+        periods,
+        scenario="Actual",
+    )
+
+    # Dimension breakdown — one query per base measure, any number of groups
+    by_dept = calc.build_breakdown_table(
+        "Gross Margin %",
+        periods,
+        scenario="Actual",
+        dimension="department",   # dimension_values optional — returns all groups
+    )
 """
 
 # Calendar
