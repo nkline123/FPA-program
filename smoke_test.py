@@ -116,11 +116,17 @@ registry.register_many([
         formula=lambda v: v["Operating Income"] - v["InterestExpense"],
         tags=["income_statement"],
     ),
+    fpa.Measure(
+        name="Revenue YoY %",
+        dependencies=["Revenue"],
+        formula=lambda v: (v["Revenue"] / v["Revenue", -12] - 1) * 100 if v["Revenue", -12] else 0.0,
+        tags=["income_statement"],
+    ),
 ])
 
 # --- 4. Set up calendar and calculator ---
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
-calc = fpa.Calculator(registry, connection=con)
+calc = fpa.Calculator(registry, connection=con, calendar=calendar)
 
 fy2024_months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
@@ -145,7 +151,19 @@ for name in measure_names:
     row = f"{name:<22}" + "".join(fmt(actuals.loc[name, p.label], name) for p in fy2024_months)
     print(row)
 
-# --- 6. Revenue breakdown by entity — explicit dimension_values ---
+# --- 6. YoY Revenue Growth (FY2025 vs FY2024) ---
+print("\n--- FY2025 Budget Revenue YoY % vs FY2024 Budget (Python resolver path) ---")
+fy2025_months = calendar.periods_for_fiscal_year(2025, fpa.Grain.MONTH)
+yoy_table = calc.build_table(["Revenue", "Revenue YoY %"], fy2025_months, scenario="Budget")
+
+yoy_header = f"{'Measure':<22}" + "".join(f"{p.label:>12}" for p in fy2025_months)
+print(yoy_header)
+print("-" * len(yoy_header))
+for name in ["Revenue", "Revenue YoY %"]:
+    row = f"{name:<22}" + "".join(fmt(yoy_table.loc[name, p.label], name) for p in fy2025_months)
+    print(row)
+
+# --- 7. Revenue breakdown by entity — explicit dimension_values ---
 print("\n--- FY2024 Revenue by Entity (explicit dimension_values) ---")
 entities = ["North", "South", "West"]
 rev_breakdown = calc.build_breakdown_table(
@@ -160,7 +178,7 @@ for entity in entities:
     row = f"{entity:<10}" + "".join(fmt(rev_breakdown.loc[entity, p.label], "") for p in fy2024_months)
     print(row)
 
-# --- 7. Gross Margin breakdown — all entities, no dimension_values ---
+# --- 8. Gross Margin breakdown — all entities, no dimension_values ---
 print("\n--- FY2024 Q1 Gross Margin % by Entity (all groups, no dimension_values) ---")
 q1_periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)[:3]
 gm_breakdown = calc.build_breakdown_table(
@@ -176,7 +194,7 @@ for entity in gm_breakdown.index:
     row = f"{str(entity):<10}" + "".join(fmt(gm_breakdown.loc[entity, p.label], "%") for p in q1_periods)
     print(row)
 
-# --- 8. Verify Python resolver fallback path ---
+# --- 9. Verify Python resolver fallback path ---
 print("\n--- Python resolver fallback (no DuckDB connection) ---")
 py_registry = fpa.MeasureRegistry()
 py_registry.register_many([

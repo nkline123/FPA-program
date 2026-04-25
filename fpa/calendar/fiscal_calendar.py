@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import date
 from dateutil.relativedelta import relativedelta
-from typing import List
+from typing import List, Optional
 
 from .period import Grain, Period
 
@@ -188,6 +188,22 @@ class FiscalCalendar:
         """Return the same period one fiscal year earlier."""
         prior_start = period.start - relativedelta(years=1)
         return self.period_for(prior_start, period.grain)
+
+    def shift(self, period: Period, months: int, grain: Optional[Grain] = None) -> Period:
+        """Return a Period shifted by `months` months.
+
+        Negative values look backwards; positive look forwards.  The offset is
+        always applied to period.start.
+
+        Args:
+            period: Source period.
+            months: Month offset (negative = past, positive = future).
+            grain:  Target grain.  Defaults to the source period's grain.
+                    Pass a different grain to cross grain boundaries, e.g.
+                    shift(q2_2024, 0, Grain.MONTH) → Apr 2024.
+        """
+        shifted_start = period.start + relativedelta(months=months)
+        return self.period_for(shifted_start, grain if grain is not None else period.grain)
 
     def prior_period(self, period: Period) -> Period:
         """Return the immediately preceding period of the same grain."""

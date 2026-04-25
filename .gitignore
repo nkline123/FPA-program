@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 *.pyd
 *.pyo
+.pytest_cache/
 
 # Distribution / packaging
 dist/
@@ -17,6 +18,12 @@ build/
 # IDE
 .vscode/
 .idea/
+
+# Claude Code project settings
+.claude/
+
+# Generated sample data (use sample_data/generate_*.py to recreate)
+sample_data/*.csv
 
 # OS
 .DS_Store

@@ -174,3 +174,37 @@ def test_last_day_agg_expr_returns_zero_with_no_matching_rows(con, calendar):
     assert sum_result      == pytest.approx(0.0)
     assert avg_result      == pytest.approx(0.0)
     assert last_day_result == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Issue 8 — _agg_expr quotes value_col and date_col
+# ---------------------------------------------------------------------------
+
+def test_agg_expr_quotes_reserved_word_column_names():
+    """
+    value_col and date_col that are SQL reserved words (e.g. 'end', 'value')
+    must be double-quoted in the generated expression to avoid parser errors.
+    """
+    con = duckdb.connect()
+    con.execute("""
+        CREATE TABLE t (
+            scenario VARCHAR,
+            "end"    DATE,
+            "value"  DOUBLE
+        )
+    """)
+    con.executemany("INSERT INTO t VALUES (?, ?, ?)", [
+        ("Actual", date(2024, 1, 15), 200.0),
+        ("Actual", date(2024, 1, 31), 300.0),
+    ])
+    calendar = FiscalCalendar(fiscal_year_start_month=1)
+    period = calendar.month_period(date(2024, 1, 1))
+
+    sum_expr      = _Calculator._agg_expr(AggType.SUM,      "value", "end", period)
+    avg_expr      = _Calculator._agg_expr(AggType.AVERAGE,  "value", "end", period)
+    last_day_expr = _Calculator._agg_expr(AggType.LAST_DAY, "value", "end", period)
+
+    assert con.execute(f"SELECT {sum_expr}      FROM t").fetchone()[0] == pytest.approx(500.0)
+    assert con.execute(f"SELECT {avg_expr}      FROM t").fetchone()[0] == pytest.approx(250.0)
+    assert con.execute(f"SELECT {last_day_expr} FROM t").fetchone()[0] == pytest.approx(300.0)
+    con.close()

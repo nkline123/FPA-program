@@ -67,7 +67,7 @@ registry.register_many([
 ])
 
 # 3. Build the calculator and request a P&L table
-calc = fpa.Calculator(registry, connection=con)
+calc = fpa.Calculator(registry, connection=con, calendar=calendar)
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
 table = calc.build_table(
@@ -126,6 +126,21 @@ prior_month = calendar.prior_period(jan)
 prior_year  = calendar.prior_year_period(jan)
 ytd         = calendar.ytd_periods(march)      # [Jan, Feb, Mar 2024]
 rolling_12  = calendar.rolling_periods(aug, 12)
+```
+
+### Shifting a period
+
+`shift()` returns a new period offset by N months from the source period's
+start date.  Grain is preserved by default; pass a target grain to cross grain
+boundaries.
+
+```python
+calendar.shift(jan_2024, -1)                    # Dec 2023  (monthly → monthly)
+calendar.shift(jan_2024, -12)                   # Jan 2023  (one year back)
+calendar.shift(q2_2024, -3)                     # FY2024 Q1 (quarter → quarter)
+calendar.shift(q2_2024,  0, fpa.Grain.MONTH)   # Apr 2024  (quarter → first month)
+calendar.shift(q2_2024,  1, fpa.Grain.MONTH)   # May 2024  (quarter → second month)
+calendar.shift(q2_2024,  2, fpa.Grain.MONTH)   # Jun 2024  (quarter → third month)
 ```
 
 ### Period attributes
@@ -199,16 +214,27 @@ fpa.Measure(
 )
 ```
 
-**formula** receives `{measure_name: float}` for every declared dependency.
-Dependencies are resolved before the formula is called, in topological order.
+**formula** receives a `MeasureValues` object `v` for every declared
+dependency.  It behaves like a dict for plain lookups and adds two extra
+capabilities:
+
+```python
+v["Revenue"]                   # current period value (plain lookup)
+v["Revenue", -12]              # Revenue 12 months prior, same grain
+v["Revenue", 0, fpa.Grain.MONTH]  # Revenue for start-of-period month (cross-grain)
+v.period                       # the Period being resolved — grain, start, end, label
+v.scenario                     # the scenario string
+```
+
+See [Time-Shifted Measures](#time-shifted-measures) for full details.
 
 **Python conditional formulas** work naturally:
 ```python
 formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100) if v["Revenue"] else 0.0
 ```
 On the DuckDB path, the library attempts vectorized pandas arithmetic first
-and falls back to row-wise `.apply()` automatically for formulas that cannot
-be vectorized.
+and falls back to row-wise `.apply()` automatically for formulas that use
+conditionals, time-shifted lookups, or `v.period`.
 
 ### Headcount (AggType.LAST_DAY)
 
@@ -253,16 +279,18 @@ len(registry)                                # → int
 import duckdb
 
 con = duckdb.connect("warehouse.duckdb")
+calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 
 calc = fpa.Calculator(
     registry,
     connection=con,          # open duckdb.DuckDBPyConnection
     date_col="date",         # default date column (overridden per-measure by BaseMeasure.date_col)
     scenario_col="scenario", # default "scenario"
+    calendar=calendar,       # required for time-shifted lookups in Measure formulas
 )
 ```
 
-### Resolve a single value (Python path)
+### Resolve a single value
 
 ```python
 ctx = fpa.CalculationContext.make(
@@ -272,7 +300,8 @@ ctx = fpa.CalculationContext.make(
 value = calc.resolve("Revenue", ctx)   # → float (memoized)
 ```
 
-Requires `resolver` on BaseMeasure.
+Works for both SQL-backed and resolver-only measures.  When a connection is
+present, SQL-backed measures execute a single-period DuckDB query.
 
 ### Resolve multiple measures (Python path)
 
@@ -405,6 +434,102 @@ values are always parameterized (`?`).
 
 ---
 
+## Time-Shifted Measures
+
+`Measure` formulas can look up dependency values from a different period using
+tuple indexing on `v`.  This requires passing `calendar=` to `Calculator`.
+
+### Indexing syntax
+
+```python
+v["Revenue"]                          # current period (plain lookup)
+v["Revenue", -12]                     # 12 months prior, same grain
+v["Revenue", -3]                      # 3 months prior (= previous quarter when grain is QUARTER)
+v["Revenue", -1]                      # 1 month prior (= previous month when grain is MONTH)
+v["Revenue", 0,  fpa.Grain.MONTH]    # first month of current period (cross-grain)
+v["Revenue", 1,  fpa.Grain.MONTH]    # second month of current period
+v["Revenue", -1, fpa.Grain.MONTH]    # month before current period starts
+```
+
+The offset is always in **months**, applied to `period.start`.  Grain is
+preserved unless you supply a third element.
+
+### Common growth measures
+
+```python
+fpa.Measure(
+    name="Revenue YoY %",
+    dependencies=["Revenue"],
+    formula=lambda v: (v["Revenue"] / v["Revenue", -12] - 1) * 100
+                      if v["Revenue", -12] else 0.0,
+)
+
+fpa.Measure(
+    name="Revenue QoQ %",   # use with quarterly periods
+    dependencies=["Revenue"],
+    formula=lambda v: (v["Revenue"] / v["Revenue", -3] - 1) * 100
+                      if v["Revenue", -3] else 0.0,
+)
+
+fpa.Measure(
+    name="Revenue MoM %",   # use with monthly periods
+    dependencies=["Revenue"],
+    formula=lambda v: (v["Revenue"] / v["Revenue", -1] - 1) * 100
+                      if v["Revenue", -1] else 0.0,
+)
+```
+
+### v.period — grain-aware formulas
+
+`v.period` exposes the `Period` being resolved, letting a single formula adapt
+to any grain.
+
+```python
+_GRAIN_MONTHS = {
+    fpa.Grain.MONTH:   1,
+    fpa.Grain.QUARTER: 3,
+    fpa.Grain.YEAR:    12,
+}
+
+def _lagged_sm(v):
+    """S&M summed over the months that precede each month of the current period by 1."""
+    if v.period.grain == fpa.Grain.MONTH:
+        return v["S&M", -1]
+    elif v.period.grain == fpa.Grain.QUARTER:
+        return sum(v["S&M", i, fpa.Grain.MONTH] for i in range(-1, 2))
+    else:  # YEAR
+        return sum(v["S&M", i, fpa.Grain.MONTH] for i in range(-1, 11))
+
+fpa.Measure(name="Lagged S&M", dependencies=["S&M"], formula=_lagged_sm)
+```
+
+The offset range `range(-1, n-1)` produces `n` monthly values starting one
+month before the period — a 1-month conversion lag.  Change `-1` to `-2` for a
+2-month lag.
+
+### Cross-grain breakdown
+
+The three-argument form lets quarterly or annual formulas inspect individual
+months within (or around) a period:
+
+```python
+# From Q2 2024:  v["Revenue", 0, Grain.MONTH]  → Apr 2024
+#                v["Revenue", 1, Grain.MONTH]  → May 2024
+#                v["Revenue", 2, Grain.MONTH]  → Jun 2024
+#                v["Revenue", -1, Grain.MONTH] → Mar 2024 (month before quarter)
+```
+
+### Dimension breakdowns with time-shifted measures
+
+Time-shifted measures work with `build_breakdown_table`.  Each dimension value
+resolves the lagged period independently via a parameterized DuckDB query, so
+North gets North's prior-year revenue and South gets South's.  The engine uses
+individual per-cell queries rather than the batch path for the lagged values,
+which is efficient for typical FP&A cardinality but may be slow for dimensions
+with thousands of distinct values.
+
+---
+
 ## Python Resolver Patterns
 
 Provide a `resolver` alongside `sql` if you need the library to work without
@@ -439,7 +564,12 @@ fpa.BaseMeasure(
 )
 ```
 
-### Prior period reference
+### Prior period reference (resolver approach)
+
+Prefer the `Measure` formula approach with `v["Revenue", -1]` described in
+[Time-Shifted Measures](#time-shifted-measures).  The resolver pattern below
+is still valid when you need prior-period logic inside a `BaseMeasure` resolver
+specifically — for example, when there is no DuckDB connection.
 
 ```python
 def query_mom_growth(ctx):

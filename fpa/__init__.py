@@ -71,6 +71,7 @@ from .measures.measure_registry import MeasureRegistry
 
 # Engine
 from .engine.calculator import Calculator, CalculationContext
+from .engine.measure_values import MeasureValues
 
 __all__ = [
     # Calendar
@@ -86,4 +87,5 @@ __all__ = [
     # Engine
     "Calculator",
     "CalculationContext",
+    "MeasureValues",
 ]

@@ -331,3 +331,67 @@ def test_rolling_periods_requires_monthly():
     p = c.quarter_period(date(2024, 3, 1))
     with pytest.raises(ValueError):
         c.rolling_periods(p, 4)
+
+
+# ---------------------------------------------------------------------------
+# shift()
+# ---------------------------------------------------------------------------
+
+def test_shift_forward_one_month():
+    c = cal()
+    jan = c.month_period(date(2024, 1, 1))
+    result = c.shift(jan, 1)
+    assert result.label == "Feb 2024"
+    assert result.grain == Grain.MONTH
+
+
+def test_shift_backward_one_month():
+    c = cal()
+    jan = c.month_period(date(2024, 1, 1))
+    result = c.shift(jan, -1)
+    assert result.label == "Dec 2023"
+
+
+def test_shift_zero_returns_same_period():
+    c = cal()
+    jan = c.month_period(date(2024, 1, 1))
+    result = c.shift(jan, 0)
+    assert result == jan
+
+
+def test_shift_backward_twelve_months():
+    c = cal()
+    jan_2024 = c.month_period(date(2024, 1, 1))
+    result = c.shift(jan_2024, -12)
+    assert result.label == "Jan 2023"
+
+
+def test_shift_quarterly_period_same_grain():
+    c = cal()
+    q2 = c.quarter_period(date(2024, 4, 1))
+    result = c.shift(q2, -3)
+    assert result.label == "FY2024 Q1"
+    assert result.grain == Grain.QUARTER
+
+
+def test_shift_cross_grain_quarter_to_month():
+    c = cal()
+    q2 = c.quarter_period(date(2024, 4, 1))
+    assert c.shift(q2, 0, Grain.MONTH).label == "Apr 2024"
+    assert c.shift(q2, 1, Grain.MONTH).label == "May 2024"
+    assert c.shift(q2, 2, Grain.MONTH).label == "Jun 2024"
+
+
+def test_shift_preserves_grain_by_default():
+    c = cal()
+    q1 = c.quarter_period(date(2024, 1, 1))
+    result = c.shift(q1, 3)
+    assert result.grain == Grain.QUARTER
+
+
+def test_shift_non_january_fiscal_year():
+    c = cal(start_month=7, convention="ending")
+    jul_2024 = c.month_period(date(2024, 7, 1))
+    result = c.shift(jul_2024, -12)
+    assert result.label == "Jul 2023"
+    assert result.fiscal_year == 2024

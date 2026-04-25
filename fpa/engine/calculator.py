@@ -7,6 +7,12 @@ from ..calendar.period import AggType, Period
 from ..measures.measure import BaseMeasure, Measure, AnyMeasure
 from ..measures.measure_registry import MeasureRegistry
 from ..measures.dag import MeasureDAG
+from .measure_values import MeasureValues
+
+
+def _col_key(period: "Period", measure_name: str) -> str:
+    """Internal DataFrame column key: '<period label>|<measure name>'."""
+    return f"{period.label}|{measure_name}"
 
 
 @dataclass(frozen=True)
@@ -73,15 +79,18 @@ class Calculator:
                       Used when a BaseMeasure does not set its own date_col.
                       Default: "date".
         scenario_col: Column name for the scenario label.  Default: "scenario".
+        calendar:     Optional FiscalCalendar.  Required only when any Measure
+                      formula uses time-shifted lookups (v["Revenue", -12]).
+                      Unused otherwise — existing formulas are unaffected.
 
     Examples:
         # DuckDB path — primary
         import duckdb
         con = duckdb.connect("warehouse.duckdb")
-        calc = fpa.Calculator(registry, connection=con)
+        calc = fpa.Calculator(registry, connection=con, calendar=calendar)
 
         # Python path — no database required (BaseMeasures need resolver)
-        calc = fpa.Calculator(registry)
+        calc = fpa.Calculator(registry, calendar=calendar)
     """
 
     def __init__(
@@ -90,6 +99,7 @@ class Calculator:
         connection=None,
         date_col: str = "date",
         scenario_col: str = "scenario",
+        calendar=None,
     ):
         self._registry = registry
         self._dag = MeasureDAG(registry)
@@ -98,6 +108,7 @@ class Calculator:
         self._con = connection
         self._date_col = date_col
         self._scenario_col = scenario_col
+        self._calendar = calendar
 
     # ------------------------------------------------------------------
     # Public API
@@ -238,25 +249,41 @@ class Calculator:
         return value
 
     def _resolve_base(self, measure: BaseMeasure, context: CalculationContext) -> float:
-        if measure.resolver is None:
-            raise RuntimeError(
-                f"BaseMeasure '{measure.name}' has no resolver. "
-                "Provide a resolver for the Python path, or use a "
-                "Calculator with a DuckDB connection."
+        if measure.resolver is not None:
+            try:
+                result = measure.resolver(context)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Resolver error in BaseMeasure '{measure.name}': {e}"
+                ) from e
+            return 0.0 if result is None else float(result)
+
+        if self._con and measure.sql:
+            # Single-period scalar query — used by resolve() and time-shifted lookups
+            date_col = measure.date_col or self._date_col
+            sql = measure.sql.rstrip().rstrip(";")
+            agg_expr = self._agg_expr(measure.agg_type, measure.value_col, date_col, context.period)
+            where_parts = [f'"{self._scenario_col}" = ?']
+            params: List[Any] = [context.scenario]
+            for k, v in context.filters:
+                where_parts.append(f'"{k}" = ?')
+                params.append(v)
+            query = (
+                f"SELECT {agg_expr} FROM ({sql}) __base "
+                f"WHERE {' AND '.join(where_parts)}"
             )
-        try:
-            result = measure.resolver(context)
-        except Exception as e:
-            raise RuntimeError(
-                f"Resolver error in BaseMeasure '{measure.name}': {e}"
-            ) from e
-        if result is None:
-            return 0.0
-        return float(result)
+            result = self._con.execute(query, params).fetchone()[0]
+            return 0.0 if result is None else float(result)
+
+        raise RuntimeError(
+            f"BaseMeasure '{measure.name}' has no resolver. "
+            "Provide a resolver for the Python path, or use a "
+            "Calculator with a DuckDB connection."
+        )
 
     def _resolve_derived(self, measure: Measure, context: CalculationContext) -> float:
         dep_values = {dep: self._resolve_unchecked(dep, context) for dep in measure.dependencies}
-        return measure.formula(dep_values)
+        return measure.formula(MeasureValues(dep_values, self, context))
 
     def _breakdown_python(
         self,
@@ -321,13 +348,13 @@ class Calculator:
             raw, all_needed, periods, scenario,
             dimension=None, dimension_values=None, **filters
         )
-        raw = self._add_derived_columns(raw, all_needed, periods)
+        raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters)
 
         data = {}
         for period in periods:
             col_values = {}
             for name in measure_names:
-                key = f"{period.label}|{name}"
+                key = _col_key(period, name)
                 col_values[name] = float(raw[key].iloc[0]) if key in raw.columns else 0.0
             data[period.label] = col_values
 
@@ -366,9 +393,9 @@ class Calculator:
             raw, all_needed, periods, scenario,
             dimension=dimension, dimension_values=dimension_values, **filters
         )
-        raw = self._add_derived_columns(raw, all_needed, periods)
+        raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters, dimension)
 
-        target_cols = [f"{period.label}|{measure_name}" for period in periods]
+        target_cols = [_col_key(period, measure_name) for period in periods]
         result = raw[target_cols].copy()
         result.columns = [period.label for period in periods]
 
@@ -478,17 +505,17 @@ class Calculator:
         """
         start = period.start   # datetime.date → "YYYY-MM-DD" in f-string
         end = period.end
-        date_filter = f"{date_col} BETWEEN '{start}' AND '{end}'"
+        date_filter = f'"{date_col}" BETWEEN \'{start}\' AND \'{end}\''
 
         if agg_type == AggType.LAST_DAY:
             # arg_max returns value_col from the row with the latest date_col
             # within the period — correct for headcount, balances, ARR, etc.
-            return f"COALESCE(arg_max({value_col}, {date_col}) FILTER (WHERE {date_filter}), 0.0)"
+            return f'COALESCE(arg_max("{value_col}", "{date_col}") FILTER (WHERE {date_filter}), 0.0)'
         elif agg_type == AggType.AVERAGE:
-            return f"COALESCE(AVG({value_col}) FILTER (WHERE {date_filter}), 0.0)"
+            return f'COALESCE(AVG("{value_col}") FILTER (WHERE {date_filter}), 0.0)'
         else:
             # SUM
-            return f"COALESCE(SUM({value_col}) FILTER (WHERE {date_filter}), 0.0)"
+            return f'COALESCE(SUM("{value_col}") FILTER (WHERE {date_filter}), 0.0)'
 
     def _fill_python_base_columns(
         self,
@@ -517,7 +544,7 @@ class Calculator:
 
         for period in periods:
             for name in python_only:
-                col = f"{period.label}|{name}"
+                col = _col_key(period, name)
                 if col in df.columns:
                     continue
 
@@ -555,14 +582,17 @@ class Calculator:
         df: pd.DataFrame,
         all_needed: List[str],
         periods: List[Period],
+        scenario: str = "",
+        filters: Optional[dict] = None,
+        dimension: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Compute derived measure columns in DAG order and concat in one shot.
 
         Attempts vectorized pandas arithmetic first.  Falls back to row-wise
         .apply() for formulas that include Python conditionals (e.g.
-        ``if v['Revenue'] else 0``) which raise ValueError when passed a
-        Series.
+        ``if v['Revenue'] else 0``) or time-shifted lookups (v["Revenue", -12])
+        which cannot be vectorized.
 
         Returns the DataFrame with derived columns appended (new object when
         any derived columns were added, same object otherwise).
@@ -574,26 +604,22 @@ class Calculator:
             if not isinstance(m, Measure):
                 continue
             for period in periods:
-                col = f"{period.label}|{name}"
+                col = _col_key(period, name)
                 if col in df.columns or col in new_cols:
                     continue
                 dep_series = {
-                    dep: new_cols.get(
-                        f"{period.label}|{dep}",
-                        df.get(f"{period.label}|{dep}"),
-                    )
+                    dep: new_cols.get(_col_key(period, dep), df.get(_col_key(period, dep)))
                     for dep in m.dependencies
                 }
                 try:
                     new_cols[col] = m.formula(dep_series)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    # KeyError: formula used tuple key v["Revenue", -12] on plain dict
                     combined = df.assign(
                         **{k: v for k, v in new_cols.items() if k not in df.columns}
                     )
                     new_cols[col] = combined.apply(
-                        lambda row, m=m, period=period: m.formula(
-                            {dep: row[f"{period.label}|{dep}"] for dep in m.dependencies}
-                        ),
+                        self._make_row_applier(m, period, scenario, filters, dimension),
                         axis=1,
                     )
 
@@ -603,6 +629,27 @@ class Calculator:
             )
         return df
 
+    def _make_row_applier(
+        self,
+        measure: Measure,
+        period: Period,
+        scenario: str,
+        filters: Optional[dict],
+        dimension: Optional[str],
+    ):
+        """Return a row → float callable for use with DataFrame.apply."""
+        def _apply(row):
+            dim_filter = {dimension: row.name} if dimension else {}
+            ctx = CalculationContext.make(
+                period=period,
+                scenario=scenario,
+                **dim_filter,
+                **(filters or {}),
+            )
+            dep_values = {dep: row[_col_key(period, dep)] for dep in measure.dependencies}
+            return measure.formula(MeasureValues(dep_values, self, ctx))
+        return _apply
+
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
@@ -610,9 +657,9 @@ class Calculator:
     def _any_base_has_sql(self, all_needed: List[str]) -> bool:
         """Return True if any base measure in the dependency chain has sql."""
         return any(
-            bool(self._registry.get(n).sql)
+            bool(m.sql)
             for n in all_needed
-            if isinstance(self._registry.get(n), BaseMeasure)
+            if isinstance(m := self._registry.get(n), BaseMeasure)
         )
 
     def _measures_needed(self, names: List[str]) -> List[str]:

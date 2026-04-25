@@ -17,6 +17,9 @@ high-throughput SQL execution for both summary tables and dimension breakdowns.
 - Routes base measure resolution through **DuckDB**: wraps each measure's SQL
   as a subquery, generates `FILTER (WHERE date_col BETWEEN … AND …)` per
   period, and executes one query per base measure — with or without `GROUP BY`
+- Supports **time-shifted lookups** in `Measure` formulas: `v["Revenue", -12]`
+  fetches a dependency from a different period directly inside the formula,
+  enabling YoY, QoQ, and lag-based measures without external glue code
 
 ## What This Library Does NOT Do
 
@@ -100,6 +103,19 @@ fpa.Measure(
     formula=lambda v: v["Revenue"] - v["COGS"],
 )
 ```
+
+The `v` argument is a `MeasureValues` object.  Plain string keys return the
+current period value.  Tuple keys shift to a different period:
+
+```python
+v["Revenue", -12]                    # Revenue 12 months prior, same grain
+v["Revenue", 0, fpa.Grain.MONTH]    # Revenue for the first month of the current period
+v.period                             # the Period being resolved (grain, start, end, …)
+```
+
+This lets a single measure definition express YoY growth, conversion lags, and
+grain-aware aggregations without any external resolver glue.  Requires
+`calendar=` on the `Calculator`.
 
 Measures can depend on other measures to any depth.  The library resolves them
 in topological order and raises `ValueError` at construction if a cycle is

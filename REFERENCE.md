@@ -1,6 +1,6 @@
-# FPA Library — AI Context
+# FPA Library — Quick Reference
 
-Terse reference for AI assistants, code generation, and rapid onboarding.
+Terse API reference for rapid onboarding.
 For full examples and rationale, see [USAGE.md](USAGE.md) and [OVERVIEW.md](OVERVIEW.md).
 
 ---
