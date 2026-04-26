@@ -1,7 +1,7 @@
 # FPA Library — Usage Guide
 
 A DuckDB-centric Python library for resolving financial measures across time
-periods and scenarios.  Measures are defined as SQL queries or Python formulas;
+periods and scenarios. Measures are defined as SQL queries or Python formulas;
 the engine handles date filtering, scenario filtering, CTE chaining, and GROUP
 BY automatically.
 
@@ -13,11 +13,12 @@ For a terse cheatsheet, see [REFERENCE.md](REFERENCE.md).
 ## Installation
 
 ```bash
-pip install git+https://github.com/you/fpa.git
+pip install git+https://github.com/nkline123/FPA-program.git
 pip install duckdb
 ```
 
 Core dependencies (auto-installed):
+
 ```
 pandas
 python-dateutil
@@ -146,7 +147,7 @@ period.calendar_month    # int
 
 ## Measures
 
-All measures use the single `fpa.Measure` class.  The execution path is
+All measures use the single `fpa.Measure` class. The execution path is
 determined by which fields are set.
 
 ### Leaf SQL measure — data from DuckDB
@@ -165,41 +166,41 @@ fpa.Measure(
 )
 ```
 
-**sql** is your business-logic filter.  Use `SELECT *` so all dimension
-columns (entity, department, account_id, …) are available for GROUP BY.  Do
+**sql** is your business-logic filter. Use `SELECT *` so all dimension
+columns (entity, department, account_id, …) are available for GROUP BY. Do
 NOT include WHERE conditions for date range, scenario, or dimension values —
-those are appended by the engine automatically.  Trailing semicolons are
+those are appended by the engine automatically. Trailing semicolons are
 stripped automatically.
 
-**value_col** is the numeric column to aggregate.  Required on leaf measures
+**value_col** is the numeric column to aggregate. Required on leaf measures
 (those without `measure.<name>` references in their SQL).
 
-**date_col** is the date column used for period filtering.  Defaults to the
+**date_col** is the date column used for period filtering. Defaults to the
 Calculator's `date_col` argument if not set on the measure.
 
 **agg_type** controls the SQL aggregation function:
 
-| AggType | SQL | Use for |
-|---|---|---|
-| `SUM` | `COALESCE(SUM(value_col) FILTER (WHERE …), 0)` | Revenue, Expenses |
-| `AVERAGE` | `COALESCE(AVG(value_col) FILTER (WHERE …), 0)` | Average Price |
-| `LAST_DAY` | `arg_max(value_col, date_col) FILTER (WHERE …)` | Headcount, ARR snapshot |
-| `CUMULATIVE_END` | `COALESCE(SUM(value_col) FILTER (WHERE date <= period_end), 0)` | Balance sheet closing |
-| `CUMULATIVE_START` | `COALESCE(SUM(value_col) FILTER (WHERE date < period_start), 0)` | Balance sheet opening |
-| `CALCULATED` | not valid for SQL measures | — |
+| AggType            | SQL                                                              | Use for                 |
+| ------------------ | ---------------------------------------------------------------- | ----------------------- |
+| `SUM`              | `COALESCE(SUM(value_col) FILTER (WHERE …), 0)`                   | Revenue, Expenses       |
+| `AVERAGE`          | `COALESCE(AVG(value_col) FILTER (WHERE …), 0)`                   | Average Price           |
+| `LAST_DAY`         | `arg_max(value_col, date_col) FILTER (WHERE …)`                  | Headcount, ARR snapshot |
+| `CUMULATIVE_END`   | `COALESCE(SUM(value_col) FILTER (WHERE date <= period_end), 0)`  | Balance sheet closing   |
+| `CUMULATIVE_START` | `COALESCE(SUM(value_col) FILTER (WHERE date < period_start), 0)` | Balance sheet opening   |
+| `CALCULATED`       | not valid for SQL measures                                       | —                       |
 
 `CUMULATIVE_END` and `CUMULATIVE_START` accumulate all transactions from the
 beginning of history to the period boundary — use them for balance sheet
-accounts sourced from a GL transaction table.  The invariant
+accounts sourced from a GL transaction table. The invariant
 `CUMULATIVE_END - CUMULATIVE_START == SUM` holds for any period.
 
-**scenario** locks this measure to a specific scenario value.  When set, the
+**scenario** locks this measure to a specific scenario value. When set, the
 engine injects `WHERE "scenario_col" = 'Actual'` (or whichever value) for
-this measure regardless of what scenario is passed to `build_table`.  Useful
+this measure regardless of what scenario is passed to `build_table`. Useful
 for putting Actual and Budget measures in the same table call.
 
-**scenario_col** names the column that holds the scenario label.  Defaults to
-the Calculator's `scenario_col` argument (`"scenario"`).  Set this when your
+**scenario_col** names the column that holds the scenario label. Defaults to
+the Calculator's `scenario_col` argument (`"scenario"`). Set this when your
 table uses a different column name.
 
 ### Composed SQL measure — filtering on top of another measure
@@ -212,18 +213,18 @@ fpa.Measure(
 )
 ```
 
-Use `measure.<name>` in the SQL to reference another measure.  The engine
+Use `measure.<name>` in the SQL to reference another measure. The engine
 replaces these references with quoted CTE identifiers and builds a `WITH`
 chain, so the parent measure's data is available without re-scanning the
 source table.
 
 > **Constraint:** Measure names used in `measure.<name>` references must
-> contain only word characters (`[a-zA-Z0-9_]`).  Names with spaces or special
+> contain only word characters (`[a-zA-Z0-9_]`). Names with spaces or special
 > characters can be registered and used as formula `dependencies`, but cannot
 > be referenced via `measure.<name>` in SQL.
 
 Composed measures inherit `value_col`, `date_col`, `agg_type`, and
-`scenario_col` from the nearest SQL ancestor that defines them.  Override any
+`scenario_col` from the nearest SQL ancestor that defines them. Override any
 field on the composed measure when the aggregation genuinely changes (e.g.
 switching from `SUM` to `LAST_DAY`).
 
@@ -257,7 +258,7 @@ fpa.Measure(
 ```
 
 **formula** receives a `MeasureValues` object `v` for every declared
-dependency.  It behaves like a dict for plain lookups and adds two extra
+dependency. It behaves like a dict for plain lookups and adds two extra
 capabilities:
 
 ```python
@@ -268,7 +269,7 @@ v.period                              # the Period being resolved
 v.scenario                            # the scenario string
 ```
 
-**Python conditional formulas** work naturally.  On the DuckDB path the
+**Python conditional formulas** work naturally. On the DuckDB path the
 library attempts vectorized pandas arithmetic first and falls back to
 row-wise `.apply()` automatically for formulas that use conditionals,
 time-shifted lookups, or `v.period`.
@@ -482,7 +483,7 @@ COALESCE(SUM(amount) FILTER (WHERE date <= '2024-01-31'), 0.0) AS "Jan 2024"
 ```
 
 Period start/end dates are embedded as ISO literals (they come from
-`FiscalCalendar` — not user input).  Scenario, filter values, and dimension
+`FiscalCalendar` — not user input). Scenario, filter values, and dimension
 values are always parameterized (`?`).
 
 ---
@@ -490,7 +491,7 @@ values are always parameterized (`?`).
 ## Time-Shifted Measures
 
 `Measure` formulas can look up dependency values from a different period using
-tuple indexing on `v`.  This requires passing `calendar=` to `Calculator`.
+tuple indexing on `v`. This requires passing `calendar=` to `Calculator`.
 
 ### Indexing syntax
 
@@ -504,7 +505,7 @@ v["Revenue", 1,  fpa.Grain.MONTH]    # second month of current period
 v["Revenue", -1, fpa.Grain.MONTH]    # month before current period starts
 ```
 
-The offset is always in **months**, applied to `period.start`.  Grain is
+The offset is always in **months**, applied to `period.start`. Grain is
 preserved unless you supply a third element.
 
 ### Common growth measures
@@ -555,12 +556,12 @@ fpa.Measure(
 
 ## Fallback Rules
 
-| Condition | Path used |
-|---|---|
-| No `connection` on Calculator | Python resolver |
-| `connection` set, no SQL measure in chain | Python resolver |
-| `connection` set, at least one SQL measure in chain | DuckDB |
-| Measure has both `sql` and `resolver` | DuckDB (sql wins with connection) |
+| Condition                                           | Path used                         |
+| --------------------------------------------------- | --------------------------------- |
+| No `connection` on Calculator                       | Python resolver                   |
+| `connection` set, no SQL measure in chain           | Python resolver                   |
+| `connection` set, at least one SQL measure in chain | DuckDB                            |
+| Measure has both `sql` and `resolver`               | DuckDB (sql wins with connection) |
 
 ---
 

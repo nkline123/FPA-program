@@ -30,14 +30,28 @@ class Measure:
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",   # defaults to Calculator.scenario_col if omitted
+        )
+
+    **Scenario-locked measure** — set ``scenario`` to pin this measure to a
+    specific scenario regardless of what is passed to ``build_table``.
+    Useful for placing Actual and Budget measures in the same table call.
+
+        Measure(
+            name="Actual Revenue",
+            sql="SELECT * FROM gl WHERE account_type = 'Income'",
+            value_col="amount",
+            date_col="date",
+            agg_type=AggType.SUM,
+            scenario="Actual",         # always filters WHERE scenario = 'Actual'
         )
 
     **Composed SQL measure** — SQL references another measure via
     ``measure.<name>``.  The engine builds a CTE chain so the parent
     measure's data is available without re-scanning the source table.
-    ``value_col``, ``date_col``, and ``agg_type`` are inherited from the
-    nearest SQL ancestor that defines them; override them here only when
-    the aggregation genuinely changes.
+    ``value_col``, ``date_col``, ``agg_type``, and ``scenario_col`` are
+    inherited from the nearest SQL ancestor that defines them; override
+    them here only when the aggregation genuinely changes.
 
     .. note::
         Measure names used in ``measure.<name>`` SQL references must contain
@@ -48,7 +62,7 @@ class Measure:
         Measure(
             name="Sales & Marketing Expense",
             sql="SELECT * FROM measure.Expense WHERE department IN ('Sales', 'Marketing')",
-            # value_col / date_col / agg_type inherited from Expense
+            # value_col / date_col / agg_type / scenario_col inherited from Expense
         )
 
     **Python-derived measure** — computed from other resolved measures.

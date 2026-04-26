@@ -3,7 +3,7 @@
 A DuckDB-centric Python library for resolving financial measures across time
 periods and scenarios.
 
-Measures are defined as SQL queries or Python formulas.  SQL measures compose
+Measures are defined as SQL queries or Python formulas. SQL measures compose
 on top of each other via `measure.<name>` references — the engine builds a
 CTE chain so parent measures are available without re-scanning source tables.
 The engine injects date, scenario, and dimension filters automatically and
@@ -11,17 +11,17 @@ executes one CTE-chained query per SQL measure covering all periods at once.
 
 ## Documentation
 
-| File | What's in it |
-|---|---|
-| [OVERVIEW.md](OVERVIEW.md) | Concepts, design philosophy, execution paths |
-| [USAGE.md](USAGE.md) | Full API reference with examples |
-| [REFERENCE.md](REFERENCE.md) | Terse cheatsheet for quick lookup |
-| [smoke_test.py](smoke_test.py) | Working end-to-end example with sample data |
+| File                           | What's in it                                 |
+| ------------------------------ | -------------------------------------------- |
+| [OVERVIEW.md](OVERVIEW.md)     | Concepts, design philosophy, execution paths |
+| [USAGE.md](USAGE.md)           | Full API reference with examples             |
+| [REFERENCE.md](REFERENCE.md)   | Terse cheatsheet for quick lookup            |
+| [smoke_test.py](smoke_test.py) | Working end-to-end example with sample data  |
 
 ## Install
 
 ```bash
-pip install git+https://github.com/you/fpa.git
+pip install git+https://github.com/nkline123/FPA-program.git
 pip install duckdb
 ```
 
@@ -92,9 +92,9 @@ by_entity = calc.build_breakdown_table(
 
 ## How it works
 
-For each leaf SQL measure, the engine builds a CTE chain.  Composed measures
+For each leaf SQL measure, the engine builds a CTE chain. Composed measures
 reference parent CTEs via `"MeasureName"` identifiers — all in one `WITH`
-clause.  One query covers every requested period via `FILTER` aggregations:
+clause. One query covers every requested period via `FILTER` aggregations:
 
 ```sql
 WITH "Revenue" AS (
