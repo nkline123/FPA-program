@@ -1,181 +1,149 @@
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 from ..calendar.period import AggType
 
 
-@dataclass(frozen=True)
-class BaseMeasure:
-    """
-    A leaf measure that fetches its value from a DuckDB table.
+_MEASURE_REF_RE = re.compile(r'\bmeasure\.(\w+)\b', re.IGNORECASE)
 
-    Define the measure by writing a SQL SELECT query that filters the source
-    table to the rows that contribute to this measure.  The engine wraps that
-    query as a subquery, then automatically appends:
 
-      - A WHERE clause for scenario, period date range, and any extra filters
-        passed to build_table / build_breakdown_table.
-      - A GROUP BY clause for the breakdown dimension (when requested).
-
-    Every column produced by your SQL other than value_col and date_col is
-    treated as a dimension and can be used as a breakdown axis with no
-    additional configuration.
-
-    Args:
-        name:      Unique measure name.  Used as the key everywhere.
-        sql:       A SQL SELECT query returning the rows for this measure.
-                   Use SELECT * so that all dimension columns (entity,
-                   department, account_id, …) are available for filtering
-                   and GROUP BY.  Do NOT include WHERE clauses for date,
-                   scenario, or dimension values — those are added by the
-                   engine automatically.
-                   Example:
-                     "SELECT * FROM general_ledger WHERE account_type = 'Income'"
-                   Trailing semicolons are stripped automatically.
-                   Optional when resolver is provided (e.g. for unit tests
-                   that run without a DuckDB connection).
-        value_col: Column in the query result containing the numeric value
-                   to aggregate.  Required when sql is set.
-                   Example: "amount"
-        date_col:  Column used to filter rows to the period date range.
-                   Defaults to the Calculator's date_col if left blank.
-                   Example: "period_enddate"
-        agg_type:  How value_col is aggregated within a period:
-                     SUM      → COALESCE(SUM(value_col), 0)
-                     AVERAGE  → COALESCE(AVG(value_col), 0)
-                     LAST_DAY → COALESCE(arg_max(value_col, date_col), 0)
-                                Returns the value on the latest date in
-                                the period — correct for headcount,
-                                balance sheet, ARR, etc.
-                   CALCULATED is reserved for derived Measures and is
-                   rejected at construction time on a BaseMeasure.
-        resolver:  Optional Python callable(CalculationContext) → float.
-                   Used by the Python path (no DuckDB connection) and by
-                   build_table when no connection is available.  If omitted,
-                   a Calculator without a connection will raise RuntimeError
-                   when this measure is resolved.
-                   Return None to treat the value as 0.0.
-        tags:      Optional grouping labels (e.g. ["income_statement"]).
-        description: Human-readable description.
-
-    Examples:
-        # DuckDB-backed — primary style
-        fpa.BaseMeasure(
-            name="Revenue",
-            sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
-            value_col="amount",
-            date_col="period_enddate",
-            agg_type=fpa.AggType.SUM,
-        )
-
-        # Headcount — value at last day of the period
-        fpa.BaseMeasure(
-            name="Headcount",
-            sql="SELECT * FROM hr_data WHERE status = 'Active'",
-            value_col="employee_count",
-            date_col="as_of_date",
-            agg_type=fpa.AggType.LAST_DAY,
-        )
-
-        # Python resolver only — useful for testing without a database
-        fpa.BaseMeasure(
-            name="Revenue",
-            resolver=lambda ctx: lookup[(ctx.scenario, ctx.period.label)],
-        )
-
-        # Both — SQL for production, resolver as test fallback
-        fpa.BaseMeasure(
-            name="Revenue",
-            sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
-            value_col="amount",
-            date_col="period_enddate",
-            resolver=lambda ctx: 0.0,
-        )
-    """
-    name: str
-    sql: str = ""
-    value_col: str = ""
-    date_col: str = ""
-    agg_type: AggType = AggType.SUM
-    resolver: Optional[Callable] = None
-    tags: List[str] = field(default_factory=list)
-    description: str = ""
-
-    def __post_init__(self):
-        if not self.sql and self.resolver is None:
-            raise ValueError(
-                f"BaseMeasure '{self.name}' requires either sql or resolver (or both). "
-                "Provide sql for the DuckDB path, resolver for the Python path."
-            )
-        if self.sql and not self.value_col:
-            raise ValueError(
-                f"BaseMeasure '{self.name}' has sql but no value_col. "
-                "Set value_col to the column containing the numeric value to aggregate."
-            )
-        if self.resolver is not None and not callable(self.resolver):
-            raise ValueError(f"BaseMeasure '{self.name}' resolver must be callable")
-        if self.agg_type == AggType.CALCULATED:
-            raise ValueError(
-                f"BaseMeasure '{self.name}' cannot use AggType.CALCULATED. "
-                "CALCULATED is only valid for derived Measures that compute a formula. "
-                "Use SUM, AVERAGE, or LAST_DAY instead."
-            )
-
-    def __hash__(self):
-        return hash(self.name)
-
-    def __eq__(self, other):
-        return isinstance(other, BaseMeasure) and self.name == other.name
+def _sql_measure_refs(sql: str) -> List[str]:
+    """Return measure names referenced as measure.<name> in a SQL string."""
+    return _MEASURE_REF_RE.findall(sql)
 
 
 @dataclass(frozen=True)
 class Measure:
     """
-    A measure calculated from other measures.
+    A single measure — SQL-backed (leaf or composed) or Python-derived.
 
-    The formula receives a dict of {measure_name: float} for all declared
-    dependencies and returns a float.  Dependencies are resolved first,
-    in DAG order, before the formula is called.
+    Three execution paths, determined by which fields are set:
 
-    On the DuckDB path the engine attempts vectorized pandas arithmetic
-    first and falls back to row-wise .apply() automatically for formulas
-    that include Python conditionals (e.g. ``if v['Revenue'] else 0``).
+    **Leaf SQL measure** — SQL references a real table directly.
+    The engine wraps it in a CTE, injects period FILTER aggregations, and
+    applies scenario / filter / dimension WHERE clauses automatically.
 
-    Args:
-        name:         Unique measure name.
-        dependencies: Names of measures this formula depends on.
-                      At least one is required.
-        formula:      Callable({dep_name: value, …}) → float.
-        agg_type:     Aggregation behavior.  Default: CALCULATED.
-        tags:         Optional grouping labels.
-        description:  Human-readable description.
-
-    Example:
-        fpa.Measure(
-            name="Gross Profit",
-            dependencies=["Revenue", "COGS"],
-            formula=lambda v: v["Revenue"] - v["COGS"],
+        Measure(
+            name="Expense",
+            sql="SELECT * FROM gl WHERE account_id IN ('6000','6010')",
+            value_col="amount",
+            date_col="date",
+            agg_type=AggType.SUM,
         )
 
-        fpa.Measure(
+    **Composed SQL measure** — SQL references another measure via
+    ``measure.<name>``.  The engine builds a CTE chain so the parent
+    measure's data is available without re-scanning the source table.
+    ``value_col``, ``date_col``, and ``agg_type`` are inherited from the
+    nearest SQL ancestor that defines them; override them here only when
+    the aggregation genuinely changes.
+
+    .. note::
+        Measure names used in ``measure.<name>`` SQL references must contain
+        only word characters (``[a-zA-Z0-9_]``).  Names with spaces or
+        special characters can be registered and used as formula
+        ``dependencies``, but cannot be composed via SQL.
+
+        Measure(
+            name="Sales & Marketing Expense",
+            sql="SELECT * FROM measure.Expense WHERE department IN ('Sales', 'Marketing')",
+            # value_col / date_col / agg_type inherited from Expense
+        )
+
+    **Python-derived measure** — computed from other resolved measures.
+    The formula receives a MeasureValues dict-like object.
+
+        Measure(
             name="Gross Margin %",
             dependencies=["Gross Profit", "Revenue"],
             formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100)
                               if v["Revenue"] else 0.0,
         )
+
+    A ``resolver`` can be combined with ``sql`` to provide a Python
+    fallback when no DuckDB connection is available (useful in tests).
+
+    Args:
+        name:         Unique measure name.
+        sql:          SQL SELECT query.  Reference real tables for leaf
+                      measures; use ``measure.<name>`` to compose on top
+                      of another measure.
+        value_col:    Column to aggregate.  Required on leaf measures;
+                      inherited from the nearest SQL ancestor on composed
+                      measures.
+        date_col:     Date column for period filtering.  Inherited from
+                      the nearest SQL ancestor when omitted.
+        scenario_col: Column holding the scenario label (e.g. "scenario",
+                      "version").  Defaults to the Calculator's
+                      ``scenario_col`` argument.  Inherited from the
+                      nearest SQL ancestor when omitted.
+        agg_type:     Aggregation type (SUM / AVERAGE / LAST_DAY /
+                      CUMULATIVE_END / CUMULATIVE_START).  Inherited from
+                      the nearest SQL ancestor when omitted.
+        scenario:     When set, the engine always filters this measure to
+                      this scenario value regardless of what is passed to
+                      ``build_table``.  Useful for placing Actual and
+                      Budget measures in the same table call.
+        dependencies: Measure names required by ``formula``.
+        formula:      Callable(MeasureValues) → float.
+        resolver:     Scalar Python fallback callable(CalculationContext)
+                      → float.  Combined with ``sql`` for test fallback;
+                      used alone for resolver-only measures.
+        tags:         Optional grouping labels.
+        description:  Human-readable description.
     """
+
     name: str
-    dependencies: List[str]
-    formula: Callable[[dict[str, float]], float]
-    agg_type: AggType = AggType.CALCULATED
+    # SQL path
+    sql: str = ""
+    value_col: str = ""
+    date_col: str = ""
+    scenario_col: str = ""           # column that holds the scenario label
+    agg_type: Optional[AggType] = None
+    scenario: Optional[str] = None   # locks this measure to a specific scenario
+    # Python formula path
+    dependencies: List[str] = field(default_factory=list)
+    formula: Optional[Callable] = None
+    # Python resolver (scalar fallback, or resolver-only measure)
+    resolver: Optional[Callable] = None
+    # metadata
     tags: List[str] = field(default_factory=list)
     description: str = ""
 
     def __post_init__(self):
-        if not self.dependencies:
-            raise ValueError(f"Measure '{self.name}' must declare at least one dependency")
-        if not callable(self.formula):
-            raise ValueError(f"Measure '{self.name}' formula must be callable")
+        has_sql      = bool(self.sql)
+        has_formula  = self.formula is not None
+        has_resolver = self.resolver is not None
+
+        if not (has_sql or has_formula or has_resolver):
+            raise ValueError(
+                f"Measure '{self.name}' requires sql, formula, or resolver."
+            )
+        if has_formula and has_resolver:
+            raise ValueError(
+                f"Measure '{self.name}' cannot combine formula and resolver. "
+                "Use formula for computed measures, resolver for scalar lookups."
+            )
+        if has_sql and has_formula:
+            raise ValueError(
+                f"Measure '{self.name}' cannot combine sql with formula. "
+                "Use sql for SQL-backed measures, formula for Python-derived measures."
+            )
+        if has_formula and not self.dependencies:
+            raise ValueError(
+                f"Measure '{self.name}' with formula must declare at least one dependency."
+            )
+        # Leaf SQL measures (no measure.X refs) require value_col
+        if has_sql and not _sql_measure_refs(self.sql) and not self.value_col:
+            raise ValueError(
+                f"Measure '{self.name}' is a leaf SQL measure and requires value_col."
+            )
+        if has_sql and self.agg_type == AggType.CALCULATED:
+            raise ValueError(
+                f"Measure '{self.name}' is a SQL measure and cannot use AggType.CALCULATED. "
+                "Use SUM, AVERAGE, or LAST_DAY instead."
+            )
 
     def __hash__(self):
         return hash(self.name)
@@ -184,5 +152,5 @@ class Measure:
         return isinstance(other, Measure) and self.name == other.name
 
 
-# Type alias used throughout the engine
-AnyMeasure = BaseMeasure | Measure
+# Kept for backward compatibility
+AnyMeasure = Measure

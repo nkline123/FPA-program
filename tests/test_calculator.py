@@ -2,7 +2,7 @@ from datetime import date
 import pytest
 import duckdb
 from fpa import (
-    BaseMeasure, Measure, MeasureRegistry, Calculator,
+    Measure, MeasureRegistry, Calculator,
     CalculationContext, FiscalCalendar, Grain, AggType,
 )
 
@@ -75,14 +75,14 @@ def make_registry():
     """Registry with Revenue, COGS, Gross Profit, Gross Margin %."""
     r = MeasureRegistry()
     r.register_many([
-        BaseMeasure(
+        Measure(
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
         ),
-        BaseMeasure(
+        Measure(
             name="COGS",
             sql="SELECT * FROM gl WHERE account_id = '5000'",
             value_col="amount",
@@ -163,8 +163,8 @@ class TestCalculatorPython:
     def calc(self, calendar):
         r = MeasureRegistry()
         r.register_many([
-            BaseMeasure(name="Revenue",  resolver=lambda ctx: 100.0),
-            BaseMeasure(name="COGS",     resolver=lambda ctx: 40.0),
+            Measure(name="Revenue",  resolver=lambda ctx: 100.0),
+            Measure(name="COGS",     resolver=lambda ctx: 40.0),
             Measure(name="Gross Profit", dependencies=["Revenue", "COGS"],
                     formula=lambda v: v["Revenue"] - v["COGS"]),
             Measure(name="Gross Margin %", dependencies=["Gross Profit", "Revenue"],
@@ -188,18 +188,18 @@ class TestCalculatorPython:
 
     def test_resolver_none_becomes_zero(self, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="X", resolver=lambda ctx: None))
+        r.register(Measure(name="X", resolver=lambda ctx: None))
         assert Calculator(r).resolve("X", make_context(calendar)) == 0.0
 
     def test_resolver_error_wrapped(self, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Boom", resolver=lambda ctx: 1 / 0))
+        r.register(Measure(name="Boom", resolver=lambda ctx: 1 / 0))
         with pytest.raises(RuntimeError, match="Resolver error"):
             Calculator(r).resolve("Boom", make_context(calendar))
 
     def test_no_resolver_no_connection_raises(self, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Rev",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
@@ -208,16 +208,17 @@ class TestCalculatorPython:
         with pytest.raises(RuntimeError, match="no resolver"):
             calc.resolve("Rev", make_context(calendar))
 
+
     def test_result_coerced_to_float(self, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="X", resolver=lambda ctx: 7))
+        r.register(Measure(name="X", resolver=lambda ctx: 7))
         result = Calculator(r).resolve("X", make_context(calendar))
         assert isinstance(result, float)
 
     def test_memoization_resolver_called_once(self, calendar):
         calls = []
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Rev", resolver=lambda ctx: calls.append(1) or 50.0))
+        r.register(Measure(name="Rev", resolver=lambda ctx: calls.append(1) or 50.0))
         r.register(Measure(name="A", dependencies=["Rev"], formula=lambda v: v["Rev"]))
         r.register(Measure(name="B", dependencies=["Rev"], formula=lambda v: v["Rev"] * 2))
         calc = Calculator(r)
@@ -229,7 +230,7 @@ class TestCalculatorPython:
     def test_clear_cache_causes_re_resolve(self, calendar):
         calls = []
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Rev", resolver=lambda ctx: calls.append(1) or 10.0))
+        r.register(Measure(name="Rev", resolver=lambda ctx: calls.append(1) or 10.0))
         calc = Calculator(r)
         ctx = make_context(calendar)
         calc.resolve("Rev", ctx)
@@ -240,7 +241,7 @@ class TestCalculatorPython:
     def test_memo_isolated_across_contexts(self, calendar):
         calls = []
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Rev", resolver=lambda ctx: calls.append(1) or 10.0))
+        r.register(Measure(name="Rev", resolver=lambda ctx: calls.append(1) or 10.0))
         calc = Calculator(r)
         calc.resolve("Rev", make_context(calendar, scenario="Actual"))
         calc.resolve("Rev", make_context(calendar, scenario="Budget"))
@@ -270,7 +271,7 @@ class TestCalculatorPython:
     def test_build_table_passes_filters(self, calendar):
         received = []
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Rev",
             resolver=lambda ctx: received.append(ctx.get("entity")) or 0.0,
         ))
@@ -298,7 +299,7 @@ class TestCalculatorPython:
         def resolver(ctx):
             return {"North": 300.0, "South": 200.0}.get(ctx.get("entity"), 0.0)
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Rev", resolver=resolver))
+        r.register(Measure(name="Rev", resolver=resolver))
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = Calculator(r).build_breakdown_table(
             "Rev", periods, scenario="Actual",
@@ -313,7 +314,7 @@ class TestCalculatorPython:
             received.append((ctx.get("entity"), ctx.get("dept")))
             return 0.0
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Rev", resolver=resolver))
+        r.register(Measure(name="Rev", resolver=resolver))
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         Calculator(r).build_breakdown_table(
             "Rev", periods, scenario="Actual",
@@ -486,7 +487,7 @@ class TestCalculatorDuckDB:
     def test_last_day_agg_type_picks_latest_date(self, con, calendar):
         """arg_max returns the headcount value from the last date in the period."""
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Headcount",
             sql="SELECT * FROM hc",
             value_col="headcount",
@@ -504,7 +505,7 @@ class TestCalculatorDuckDB:
 
     def test_last_day_agg_type_by_entity(self, con, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Headcount",
             sql="SELECT * FROM hc",
             value_col="headcount",
@@ -541,14 +542,14 @@ class TestCalculatorDuckDB:
 
     def test_mixed_sql_and_resolver_base_measures(self, con, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
         ))
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Adjustment",
             resolver=lambda ctx: 50.0,   # resolver-only — no sql
         ))
@@ -569,7 +570,7 @@ class TestCalculatorDuckDB:
 
     def test_falls_back_when_no_sql(self, con, calendar):
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Fixed", resolver=lambda ctx: 99.0))
+        r.register(Measure(name="Fixed", resolver=lambda ctx: 99.0))
         calc = Calculator(r, connection=con)
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
@@ -582,13 +583,13 @@ class TestCalculatorDuckDB:
     def test_falls_back_without_connection(self, calendar):
         r = MeasureRegistry()
         r.register_many([
-            BaseMeasure(
+            Measure(
                 name="Revenue",
                 sql="SELECT * FROM gl WHERE account_id = '4000'",
                 value_col="amount", date_col="date",
                 resolver=lambda ctx: 0.0,
             ),
-            BaseMeasure(
+            Measure(
                 name="COGS",
                 sql="SELECT * FROM gl WHERE account_id = '5000'",
                 value_col="amount", date_col="date",
@@ -627,8 +628,8 @@ class TestCalculatorDuckDB:
 
         python_registry = MeasureRegistry()
         python_registry.register_many([
-            BaseMeasure(name="Revenue", resolver=lambda ctx: q(["4000"], ctx)),
-            BaseMeasure(name="COGS",    resolver=lambda ctx: q(["5000"], ctx)),
+            Measure(name="Revenue", resolver=lambda ctx: q(["4000"], ctx)),
+            Measure(name="COGS",    resolver=lambda ctx: q(["5000"], ctx)),
             Measure(name="Gross Profit", dependencies=["Revenue", "COGS"],
                     formula=lambda v: v["Revenue"] - v["COGS"]),
         ])
@@ -715,7 +716,7 @@ class TestCalculatorDuckDB:
         con.execute("INSERT INTO gl VALUES (?, ?, ?, ?, ?, ?)",
                     ("Actual", "4000", date(2024, 1, 20), "North", 100.0, "O'Connor's Dept"))
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
@@ -734,7 +735,7 @@ class TestCalculatorDuckDB:
     def test_trailing_semicolon_in_sql_stripped(self, con, calendar):
         """A trailing semicolon in BaseMeasure.sql is stripped before use."""
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000';",  # trailing semicolon
             value_col="amount",

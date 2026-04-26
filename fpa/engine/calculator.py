@@ -1,10 +1,11 @@
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from ..calendar.period import AggType, Period
-from ..measures.measure import BaseMeasure, Measure, AnyMeasure
+from ..measures.measure import Measure, _sql_measure_refs, _MEASURE_REF_RE
 from ..measures.measure_registry import MeasureRegistry
 from ..measures.dag import MeasureDAG
 from .measure_values import MeasureValues
@@ -15,26 +16,33 @@ def _col_key(period: "Period", measure_name: str) -> str:
     return f"{period.label}|{measure_name}"
 
 
+def _filter_clause(key: str, value: Any) -> Tuple[str, List[Any]]:
+    """Return (sql_fragment, params) for a single filter key/value pair.
+
+    List or tuple values generate an IN clause; scalars generate = ?.
+    """
+    if isinstance(value, (list, tuple)):
+        placeholders = ", ".join("?" * len(value))
+        return f'"{key}" IN ({placeholders})', list(value)
+    return f'"{key}" = ?', [value]
+
+
 @dataclass(frozen=True)
 class CalculationContext:
     """
     Bundles the inputs needed to resolve a single measure value.
 
-    Passed to every BaseMeasure resolver so it has full context about what
-    is being requested.  Frozen so it can be used as a dict key in the memo
-    cache.
+    Frozen so it can be used as a dict key in the memo cache.
 
     Attributes:
         period:   The time period being resolved.
         scenario: The scenario label (e.g. "Actual", "Budget", "Forecast").
-        filters:  Arbitrary key/value pairs for slicing data
-                  (e.g. {"entity": "North", "department": "Engineering"}).
-                  Stored as a tuple of sorted pairs so the dataclass stays
-                  hashable.
+        filters:  Arbitrary key/value pairs for slicing data.
+                  Stored as a tuple of sorted pairs for hashability.
     """
     period: Period
     scenario: str
-    filters: tuple = field(default_factory=tuple)  # tuple of (key, value) pairs
+    filters: tuple = field(default_factory=tuple)
 
     @classmethod
     def make(
@@ -43,11 +51,19 @@ class CalculationContext:
         scenario: str,
         **filters: Any,
     ) -> "CalculationContext":
-        """Convenience constructor — pass filters as keyword arguments."""
+        """Convenience constructor — pass filters as keyword arguments.
+
+        List values are converted to tuples so the context stays hashable
+        and usable as a memo cache key.
+        """
+        normalised = {
+            k: tuple(v) if isinstance(v, list) else v
+            for k, v in filters.items()
+        }
         return cls(
             period=period,
             scenario=scenario,
-            filters=tuple(sorted(filters.items())),
+            filters=tuple(sorted(normalised.items())),
         )
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -60,37 +76,24 @@ class Calculator:
     Resolves measure values for a given CalculationContext.
 
     DuckDB is the primary execution path.  When a connection is provided,
-    both build_table and build_breakdown_table route base measure resolution
-    through DuckDB: the engine wraps each BaseMeasure's sql query as a
-    subquery, generates FILTER (WHERE date_col BETWEEN … AND …) expressions
-    for every requested period, and executes one query per base measure.
-    Derived measures are then computed as vectorized pandas operations.
+    SQL measures (leaf and composed) are resolved via CTE-chained queries —
+    one query per SQL measure covering all requested periods simultaneously.
+    Composed measures reference their parent via ``measure.<name>`` in their
+    SQL; the engine builds the full CTE chain automatically.
 
-    Without a connection (or for base measures that only declare a resolver),
-    the Python resolver path is used: one resolver call per (measure, period)
-    cell, memoized.
+    Python-derived measures (formula + dependencies) are computed as
+    vectorized pandas operations on the SQL results.
+
+    Without a connection, all measures fall back to Python resolvers.
 
     Args:
         registry:     The MeasureRegistry containing all measure definitions.
-        connection:   Optional open duckdb.DuckDBPyConnection.  When provided,
-                      enables the DuckDB execution path for all base measures
-                      that declare a sql query.
-        date_col:     Default column name for transaction / event dates.
-                      Used when a BaseMeasure does not set its own date_col.
-                      Default: "date".
+        connection:   Optional open duckdb.DuckDBPyConnection.
+        date_col:     Default date column name.  Used when a Measure does
+                      not set its own date_col.  Default: "date".
         scenario_col: Column name for the scenario label.  Default: "scenario".
-        calendar:     Optional FiscalCalendar.  Required only when any Measure
-                      formula uses time-shifted lookups (v["Revenue", -12]).
-                      Unused otherwise — existing formulas are unaffected.
-
-    Examples:
-        # DuckDB path — primary
-        import duckdb
-        con = duckdb.connect("warehouse.duckdb")
-        calc = fpa.Calculator(registry, connection=con, calendar=calendar)
-
-        # Python path — no database required (BaseMeasures need resolver)
-        calc = fpa.Calculator(registry, calendar=calendar)
+        calendar:     Optional FiscalCalendar.  Required for time-shifted
+                      lookups (v["Revenue", -12]) in formulas.
     """
 
     def __init__(
@@ -119,8 +122,7 @@ class Calculator:
         Return the value of measure_name for the given context.
 
         Results are memoized: repeated calls with the same (measure, context)
-        pair are free.  Requires a resolver on BaseMeasure when no DuckDB
-        connection is available.
+        pair are free.
         """
         self._ensure_dag_current()
         return self._resolve_unchecked(measure_name, context)
@@ -144,18 +146,10 @@ class Calculator:
         Resolve a list of measures across a list of periods.
 
         Returns a DataFrame with measures as rows and period labels as columns.
-
-        When a DuckDB connection is available and at least one base measure in
-        the dependency chain declares a sql query, executes one SQL query per
-        base measure (no GROUP BY) to fetch scalar values for all periods at
-        once.  Measures without sql are filled via their Python resolver.
-        Derived measures are computed as vectorized pandas operations.
-
-        Falls back to the Python resolver path when no connection is present.
         """
         self._ensure_dag_current()
         all_needed = self._measures_needed(measure_names)
-        if self._con and self._any_base_has_sql(all_needed):
+        if self._con and self._any_sql(all_needed):
             return self._build_table_duckdb(measure_names, periods, scenario, all_needed, **filters)
 
         data = {}
@@ -181,31 +175,13 @@ class Calculator:
         Returns a DataFrame with dimension values as rows and period labels
         as columns.
 
-        DuckDB path (requires connection + at least one base measure with sql):
-          Executes one SQL query per base measure using GROUP BY dimension,
-          covering all periods and all dimension values in a single scan.
-          dimension_values is optional — omit it to let DuckDB return every
-          group present in the data.  High-cardinality dimensions (100K+
-          distinct values) are handled natively by DuckDB without any
-          parameter-list explosion.
-
-        Python path (no connection, or no sql on any required base measure):
-          One resolver call per (dimension_value, period) cell.
-          dimension_values is required on the Python path.
-
-        Args:
-            measure_name:     The measure to resolve (base or derived).
-            periods:          Time periods (columns in the result).
-            scenario:         Scenario label.
-            dimension:        Column to group rows by (e.g. "department").
-            dimension_values: Optional list of specific values to return.
-                              Pass None to return all groups from the data
-                              (DuckDB path only).
-            **filters:        Additional fixed filters applied to every cell.
+        DuckDB path: one CTE-chained query per SQL measure, GROUP BY dimension.
+        Python path: one resolver call per (dimension_value, period) cell;
+                     dimension_values is required.
         """
         self._ensure_dag_current()
         all_needed = self._measures_needed([measure_name])
-        if self._con and self._any_base_has_sql(all_needed):
+        if self._con and self._any_sql(all_needed):
             return self._breakdown_duckdb(
                 measure_name, periods, scenario, all_needed,
                 dimension, dimension_values, **filters
@@ -220,7 +196,6 @@ class Calculator:
         self._memo.clear()
 
     def _ensure_dag_current(self) -> None:
-        """Rebuild the DAG if the registry's measure set has changed since init."""
         current_names = frozenset(self._registry.names())
         if current_names != self._registry_names:
             self._dag = MeasureDAG(self._registry)
@@ -231,57 +206,46 @@ class Calculator:
     # ------------------------------------------------------------------
 
     def _resolve_unchecked(self, measure_name: str, context: CalculationContext) -> float:
-        """Resolve without re-running _ensure_dag_current — for internal loops."""
         cache_key = (measure_name, context)
         if cache_key in self._memo:
             return self._memo[cache_key]
 
         measure = self._registry.get(measure_name)
-
-        if isinstance(measure, BaseMeasure):
-            value = self._resolve_base(measure, context)
-        elif isinstance(measure, Measure):
-            value = self._resolve_derived(measure, context)
+        if measure.formula is not None:
+            value = self._resolve_formula(measure, context)
         else:
-            raise TypeError(f"Unknown measure type: {type(measure)}")
+            value = self._resolve_scalar(measure, context)
 
         self._memo[cache_key] = value
         return value
 
-    def _resolve_base(self, measure: BaseMeasure, context: CalculationContext) -> float:
+    def _resolve_scalar(self, measure: Measure, context: CalculationContext) -> float:
+        """Resolve a SQL or resolver-backed measure to a scalar float."""
         if measure.resolver is not None:
             try:
                 result = measure.resolver(context)
             except Exception as e:
                 raise RuntimeError(
-                    f"Resolver error in BaseMeasure '{measure.name}': {e}"
+                    f"Resolver error in Measure '{measure.name}': {e}"
                 ) from e
             return 0.0 if result is None else float(result)
 
         if self._con and measure.sql:
-            # Single-period scalar query — used by resolve() and time-shifted lookups
-            date_col = measure.date_col or self._date_col
-            sql = measure.sql.rstrip().rstrip(";")
-            agg_expr = self._agg_expr(measure.agg_type, measure.value_col, date_col, context.period)
-            where_parts = [f'"{self._scenario_col}" = ?']
-            params: List[Any] = [context.scenario]
-            for k, v in context.filters:
-                where_parts.append(f'"{k}" = ?')
-                params.append(v)
-            query = (
-                f"SELECT {agg_expr} FROM ({sql}) __base "
-                f"WHERE {' AND '.join(where_parts)}"
+            query, params = self._build_cte_query(
+                measure.name, [context.period], context.scenario,
+                dimension=None, dimension_values=None,
+                filters=dict(context.filters),
             )
             result = self._con.execute(query, params).fetchone()[0]
             return 0.0 if result is None else float(result)
 
         raise RuntimeError(
-            f"BaseMeasure '{measure.name}' has no resolver. "
+            f"Measure '{measure.name}' has no resolver. "
             "Provide a resolver for the Python path, or use a "
             "Calculator with a DuckDB connection."
         )
 
-    def _resolve_derived(self, measure: Measure, context: CalculationContext) -> float:
+    def _resolve_formula(self, measure: Measure, context: CalculationContext) -> float:
         dep_values = {dep: self._resolve_unchecked(dep, context) for dep in measure.dependencies}
         return measure.formula(MeasureValues(dep_values, self, context))
 
@@ -325,29 +289,13 @@ class Calculator:
         all_needed: List[str],
         **filters: Any,
     ) -> pd.DataFrame:
-        """
-        Resolve measures × periods via DuckDB with no GROUP BY.
-
-        Runs one SQL query per base measure (no dimension), getting scalar
-        aggregates for all periods at once.  Resolver-only base measures are
-        filled via _fill_python_base_columns.  Derived measures are computed
-        as vectorized pandas operations.
-        """
-        base_sql_names = [
-            n for n in all_needed
-            if isinstance(self._registry.get(n), BaseMeasure)
-            and bool(self._registry.get(n).sql)
-        ]
+        sql_names = self._sql_names_to_fetch(all_needed)
 
         raw = self._sql_fetch(
-            base_sql_names, periods, scenario,
+            sql_names, periods, scenario,
             dimension=None, dimension_values=None, **filters
         )
-
-        self._fill_python_base_columns(
-            raw, all_needed, periods, scenario,
-            dimension=None, dimension_values=None, **filters
-        )
+        self._fill_resolver_columns(raw, all_needed, periods, scenario, None, None, **filters)
         raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters)
 
         data = {}
@@ -370,29 +318,13 @@ class Calculator:
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> pd.DataFrame:
-        """
-        Resolve a measure broken down by dimension via DuckDB.
-
-        Runs one SQL query per base measure with GROUP BY dimension, covering
-        all periods simultaneously.  Resolver-only base measures are filled
-        via _fill_python_base_columns.  Derived measures are computed as
-        vectorized pandas operations.
-        """
-        base_sql_names = [
-            n for n in all_needed
-            if isinstance(self._registry.get(n), BaseMeasure)
-            and bool(self._registry.get(n).sql)
-        ]
+        sql_names = self._sql_names_to_fetch(all_needed)
 
         raw = self._sql_fetch(
-            base_sql_names, periods, scenario,
+            sql_names, periods, scenario,
             dimension=dimension, dimension_values=dimension_values, **filters
         )
-
-        self._fill_python_base_columns(
-            raw, all_needed, periods, scenario,
-            dimension=dimension, dimension_values=dimension_values, **filters
-        )
+        self._fill_resolver_columns(raw, all_needed, periods, scenario, dimension, dimension_values, **filters)
         raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters, dimension)
 
         target_cols = [_col_key(period, measure_name) for period in periods]
@@ -409,7 +341,7 @@ class Calculator:
 
     def _sql_fetch(
         self,
-        base_measure_names: List[str],
+        sql_measure_names: List[str],
         periods: List[Period],
         scenario: str,
         dimension: Optional[str],
@@ -417,78 +349,149 @@ class Calculator:
         **filters: Any,
     ) -> pd.DataFrame:
         """
-        Execute one SQL query per base measure and return a combined DataFrame.
+        Execute one CTE-chained query per SQL measure and return a combined DataFrame.
 
-        Each query wraps the measure's sql as a subquery, applies scenario /
-        filter / dimension WHERE clauses (parameterized), and aggregates
-        value_col per period using FILTER (WHERE date_col BETWEEN start AND end).
+        Each query builds a WITH chain of all SQL ancestors, then aggregates the
+        terminal measure with FILTER (WHERE date BETWEEN ...) per period.
 
         Columns are named "{period.label}|{measure_name}".
-        With a dimension:  indexed by dimension value (string).
-        Without dimension: single-row DataFrame (for build_table).
-
-        Period start/end dates are embedded as literals because they come from
-        FiscalCalendar — not user input — and are always valid ISO date strings.
-        Scenario, filter values, and dimension values are always parameterized.
+        With a dimension:   indexed by dimension value (string).
+        Without dimension:  single-row DataFrame.
         """
-        if not base_measure_names:
+        if not sql_measure_names:
             return pd.DataFrame()
 
         frames: List[pd.DataFrame] = []
 
-        for name in base_measure_names:
-            m = self._registry.get(name)
-            date_col = m.date_col or self._date_col
-            sql = m.sql.rstrip().rstrip(";")
-
-            # Build SELECT expressions — one per period, embedded date literals
-            select_parts = [
-                f'{self._agg_expr(m.agg_type, m.value_col, date_col, p)} AS "{p.label}"'
-                for p in periods
-            ]
-
-            # Build WHERE clause — parameterized for all user-supplied values
-            where_parts = [f'"{self._scenario_col}" = ?']
-            params: List[Any] = [scenario]
-
-            for k, v in filters.items():
-                where_parts.append(f'"{k}" = ?')
-                params.append(v)
-
-            if dimension and dimension_values is not None:
-                placeholders = ", ".join("?" * len(dimension_values))
-                where_parts.append(f'"{dimension}" IN ({placeholders})')
-                params.extend(dimension_values)
-
-            where_clause = " AND ".join(where_parts)
-            select_clause = ", ".join(select_parts)
-
-            if dimension:
-                query = (
-                    f'SELECT "{dimension}", {select_clause} '
-                    f"FROM ({sql}) __base "
-                    f"WHERE {where_clause} "
-                    f'GROUP BY "{dimension}"'
-                )
-            else:
-                query = (
-                    f"SELECT {select_clause} "
-                    f"FROM ({sql}) __base "
-                    f"WHERE {where_clause}"
-                )
-
+        for name in sql_measure_names:
+            query, params = self._build_cte_query(
+                name, periods, scenario,
+                dimension=dimension, dimension_values=dimension_values,
+                filters=filters,
+            )
             df = self._con.execute(query, params).df()
 
             if dimension:
                 df = df.set_index(dimension)
                 df.index = df.index.astype(str)
 
-            # Prefix columns so multiple measures can coexist in one DataFrame
             df.columns = [f"{col}|{name}" for col in df.columns]
             frames.append(df)
 
-        result = pd.concat(frames, axis=1).fillna(0.0)
-        return result
+        return pd.concat(frames, axis=1).fillna(0.0)
+
+    def _build_cte_query(
+        self,
+        measure_name: str,
+        periods: List[Period],
+        scenario: str,
+        dimension: Optional[str],
+        dimension_values: Optional[List[Any]],
+        filters: dict,
+    ) -> Tuple[str, List[Any]]:
+        """
+        Build a CTE-chained SQL query for a single terminal SQL measure.
+
+        Walks up the SQL ancestor chain (measure.X references) to build a
+        WITH clause, then selects FILTER aggregations for all periods from
+        the terminal CTE.
+        """
+        sql_ancestors = self._sql_ancestors_ordered(measure_name)
+        value_col, date_col, agg_type = self._resolve_metadata(measure_name)
+
+        # Build CTE parts — replace measure.X refs with "X" identifiers
+        cte_parts = []
+        for name in sql_ancestors:
+            m = self._registry.get(name)
+            sql_body = m.sql.rstrip().rstrip(";")
+            sql_body = _MEASURE_REF_RE.sub(lambda match: f'"{match.group(1)}"', sql_body)
+            cte_parts.append(f'"{name}" AS (\n    {sql_body}\n)')
+
+        with_clause = "WITH " + ",\n".join(cte_parts)
+
+        # SELECT: period aggregations + optional dimension column
+        select_parts = [
+            f'{self._agg_expr(agg_type, value_col, date_col, p)} AS "{p.label}"'
+            for p in periods
+        ]
+        if dimension:
+            select_parts = [f'"{dimension}"'] + select_parts
+
+        # WHERE: scenario (optional) + fixed filters + optional dimension IN
+        where_parts = []
+        params: List[Any] = []
+
+        # Measure-level scenario / scenario_col override the call-level values
+        m = self._registry.get(measure_name)
+        effective_scenario     = m.scenario     if m.scenario     is not None else scenario
+        effective_scenario_col = m.scenario_col if m.scenario_col             else self._scenario_col
+
+        where_parts.append(f'"{effective_scenario_col}" = ?')
+        params.append(effective_scenario)
+
+        for k, v in filters.items():
+            fragment, vals = _filter_clause(k, v)
+            where_parts.append(fragment)
+            params.extend(vals)
+
+        if dimension and dimension_values is not None:
+            placeholders = ", ".join("?" * len(dimension_values))
+            where_parts.append(f'"{dimension}" IN ({placeholders})')
+            params.extend(dimension_values)
+
+        select_clause = ", ".join(select_parts)
+
+        query = (
+            f"{with_clause}\n"
+            f'SELECT {select_clause}\n'
+            f'FROM "{measure_name}"'
+        )
+        if where_parts:
+            query += f'\nWHERE {" AND ".join(where_parts)}'
+        if dimension:
+            query += f'\nGROUP BY "{dimension}"'
+
+        return query, params
+
+    def _sql_ancestors_ordered(self, measure_name: str) -> List[str]:
+        """
+        Return the SQL ancestor chain of measure_name plus itself, in
+        evaluation order (leaf first, terminal last).
+        """
+        all_deps = self._dag.all_dependencies_of(measure_name)
+        sql_ancestors = [n for n in all_deps if bool(self._registry.get(n).sql)]
+        return sql_ancestors + [measure_name]
+
+    def _resolve_metadata(self, measure_name: str) -> Tuple[str, str, AggType]:
+        """
+        Resolve value_col, date_col, and agg_type for a SQL measure.
+
+        For composed measures these are inherited from the nearest SQL ancestor
+        that defines them; the measure can override any individual field.
+        """
+        m = self._registry.get(measure_name)
+
+        # Walk SQL dependencies to find ancestor metadata
+        ancestor_value_col, ancestor_date_col, ancestor_agg_type = "", self._date_col, AggType.SUM
+        for dep_name in _sql_measure_refs(m.sql or ""):
+            try:
+                ancestor_value_col, ancestor_date_col, ancestor_agg_type = \
+                    self._resolve_metadata(dep_name)
+                break
+            except (ValueError, KeyError):
+                continue
+
+        value_col = m.value_col or ancestor_value_col
+        date_col  = m.date_col or ancestor_date_col
+        agg_type  = m.agg_type if m.agg_type is not None else ancestor_agg_type
+
+        if not value_col:
+            raise ValueError(
+                f"Cannot resolve value_col for measure '{measure_name}'. "
+                "Set value_col on the measure or one of its SQL ancestors."
+            )
+
+        return value_col, date_col, agg_type
 
     @staticmethod
     def _agg_expr(
@@ -497,27 +500,56 @@ class Calculator:
         date_col: str,
         period: Period,
     ) -> str:
-        """
-        Return the SQL aggregation expression for one measure × one period.
-
-        Period dates are embedded as ISO literals (safe — they come from
-        FiscalCalendar, not user input).
-        """
-        start = period.start   # datetime.date → "YYYY-MM-DD" in f-string
-        end = period.end
+        """Return the SQL aggregation expression for one measure × one period."""
+        start = period.start
+        end   = period.end
         date_filter = f'"{date_col}" BETWEEN \'{start}\' AND \'{end}\''
 
         if agg_type == AggType.LAST_DAY:
-            # arg_max returns value_col from the row with the latest date_col
-            # within the period — correct for headcount, balances, ARR, etc.
             return f'COALESCE(arg_max("{value_col}", "{date_col}") FILTER (WHERE {date_filter}), 0.0)'
         elif agg_type == AggType.AVERAGE:
             return f'COALESCE(AVG("{value_col}") FILTER (WHERE {date_filter}), 0.0)'
+        elif agg_type == AggType.CUMULATIVE_END:
+            return f'COALESCE(SUM("{value_col}") FILTER (WHERE "{date_col}" <= \'{end}\'), 0.0)'
+        elif agg_type == AggType.CUMULATIVE_START:
+            return f'COALESCE(SUM("{value_col}") FILTER (WHERE "{date_col}" < \'{start}\'), 0.0)'
         else:
-            # SUM
             return f'COALESCE(SUM("{value_col}") FILTER (WHERE {date_filter}), 0.0)'
 
-    def _fill_python_base_columns(
+    def _sql_names_to_fetch(self, all_needed: List[str]) -> List[str]:
+        """
+        Return the SQL measures that need a direct query.
+
+        A SQL measure that is only referenced via measure.X by another SQL
+        measure in the set is excluded — it will appear in that measure's CTE
+        chain.  A SQL measure is kept if it is needed directly by a Python
+        formula or is not a pure SQL dependency.
+        """
+        sql_needed = {n for n in all_needed if bool(self._registry.get(n).sql)}
+
+        # SQL measures that are pure CTE dependencies of another SQL measure
+        pure_sql_deps: set = set()
+        for n in sql_needed:
+            m = self._registry.get(n)
+            for ref in _sql_measure_refs(m.sql or ""):
+                if ref in sql_needed:
+                    pure_sql_deps.add(ref)
+
+        # SQL measures needed directly by a Python formula
+        python_formula_needs: set = set()
+        for n in all_needed:
+            m = self._registry.get(n)
+            if m.formula is not None:
+                python_formula_needs.update(m.dependencies or [])
+
+        order = self._dag.evaluation_order()
+        return [
+            n for n in order
+            if n in sql_needed
+            and (n not in pure_sql_deps or n in python_formula_needs)
+        ]
+
+    def _fill_resolver_columns(
         self,
         df: pd.DataFrame,
         all_needed: List[str],
@@ -527,23 +559,18 @@ class Calculator:
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> None:
-        """
-        Fill columns for base measures that have no sql (resolver-only).
-
-        These measures cannot be fetched via SQL, so their values are
-        resolved one cell at a time using the Python resolver and inserted
-        into the shared DataFrame.
-        """
-        python_only = [
+        """Fill columns for resolver-only measures (no sql) cell by cell."""
+        resolver_only = [
             n for n in all_needed
-            if isinstance(self._registry.get(n), BaseMeasure)
+            if self._registry.get(n).resolver is not None
             and not bool(self._registry.get(n).sql)
+            and self._registry.get(n).formula is None
         ]
-        if not python_only:
+        if not resolver_only:
             return
 
         for period in periods:
-            for name in python_only:
+            for name in resolver_only:
                 col = _col_key(period, name)
                 if col in df.columns:
                     continue
@@ -572,9 +599,7 @@ class Calculator:
                         for dv in df.index
                     ]
                 else:
-                    ctx = CalculationContext.make(
-                        period=period, scenario=scenario, **filters
-                    )
+                    ctx = CalculationContext.make(period=period, scenario=scenario, **filters)
                     df[col] = self._resolve_unchecked(name, ctx)
 
     def _add_derived_columns(
@@ -582,26 +607,21 @@ class Calculator:
         df: pd.DataFrame,
         all_needed: List[str],
         periods: List[Period],
-        scenario: str = "",
+        scenario: str,
         filters: Optional[dict] = None,
         dimension: Optional[str] = None,
     ) -> pd.DataFrame:
         """
-        Compute derived measure columns in DAG order and concat in one shot.
+        Compute Python formula measures in DAG order and append to the DataFrame.
 
-        Attempts vectorized pandas arithmetic first.  Falls back to row-wise
-        .apply() for formulas that include Python conditionals (e.g.
-        ``if v['Revenue'] else 0``) or time-shifted lookups (v["Revenue", -12])
-        which cannot be vectorized.
-
-        Returns the DataFrame with derived columns appended (new object when
-        any derived columns were added, same object otherwise).
+        Attempts vectorized pandas arithmetic first; falls back to row-wise
+        .apply() for formulas with Python conditionals or time-shifted lookups.
         """
         new_cols: Dict[str, Any] = {}
 
         for name in all_needed:
             m = self._registry.get(name)
-            if not isinstance(m, Measure):
+            if m.formula is None:
                 continue
             for period in periods:
                 col = _col_key(period, name)
@@ -614,7 +634,8 @@ class Calculator:
                 try:
                     new_cols[col] = m.formula(dep_series)
                 except (ValueError, TypeError, KeyError, AttributeError):
-                    # KeyError: formula used tuple key v["Revenue", -12] on plain dict
+                    # AttributeError: truthiness check on a Series raises in some
+                    # pandas versions; fall back to row-wise apply for conditionals
                     combined = df.assign(
                         **{k: v for k, v in new_cols.items() if k not in df.columns}
                     )
@@ -654,13 +675,9 @@ class Calculator:
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _any_base_has_sql(self, all_needed: List[str]) -> bool:
-        """Return True if any base measure in the dependency chain has sql."""
-        return any(
-            bool(m.sql)
-            for n in all_needed
-            if isinstance(m := self._registry.get(n), BaseMeasure)
-        )
+    def _any_sql(self, all_needed: List[str]) -> bool:
+        """Return True if any measure in the dependency chain has sql."""
+        return any(bool(self._registry.get(n).sql) for n in all_needed)
 
     def _measures_needed(self, names: List[str]) -> List[str]:
         """Return names + all transitive dependencies in evaluation order."""

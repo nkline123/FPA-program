@@ -9,7 +9,7 @@ from datetime import date
 import pytest
 import duckdb
 from fpa import (
-    BaseMeasure, Measure, MeasureRegistry, Calculator,
+    Measure, MeasureRegistry, Calculator,
     CalculationContext, FiscalCalendar, Grain, AggType, MeasureValues,
 )
 
@@ -51,7 +51,7 @@ class TestMeasureValuesPlainKey:
     def test_plain_key_returns_dep_value(self, calendar):
         ctx = make_ctx(calendar)
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Revenue", resolver=lambda c: 500.0))
+        r.register(Measure(name="Revenue", resolver=lambda c: 500.0))
         calc = Calculator(r, calendar=calendar)
         mv = MeasureValues({"Revenue": 500.0}, calc, ctx)
         assert mv["Revenue"] == 500.0
@@ -59,7 +59,7 @@ class TestMeasureValuesPlainKey:
     def test_plain_key_missing_raises_key_error(self, calendar):
         ctx = make_ctx(calendar)
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Revenue", resolver=lambda c: 0.0))
+        r.register(Measure(name="Revenue", resolver=lambda c: 0.0))
         calc = Calculator(r, calendar=calendar)
         mv = MeasureValues({"Revenue": 0.0}, calc, ctx)
         with pytest.raises(KeyError):
@@ -90,7 +90,7 @@ class TestMeasureValuesTimeShift:
     def test_shift_requires_calendar(self, calendar):
         ctx = make_ctx(calendar)
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Revenue", resolver=lambda c: 0.0))
+        r.register(Measure(name="Revenue", resolver=lambda c: 0.0))
         calc = Calculator(r)  # no calendar
         mv = MeasureValues({"Revenue": 0.0}, calc, ctx)
         with pytest.raises(RuntimeError, match="FiscalCalendar"):
@@ -100,7 +100,7 @@ class TestMeasureValuesTimeShift:
         """v["Revenue", -1] from Feb returns Jan's value."""
         values = {date(2024, 1, 1): 100.0, date(2024, 2, 1): 200.0}
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             resolver=lambda ctx: values[ctx.period.start],
         ))
@@ -113,7 +113,7 @@ class TestMeasureValuesTimeShift:
         """v["Revenue", -12] from Jan 2024 returns Jan 2023's value."""
         values = {date(2023, 1, 1): 800.0, date(2024, 1, 1): 1000.0}
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             resolver=lambda ctx: values.get(ctx.period.start, 0.0),
         ))
@@ -130,7 +130,7 @@ class TestMeasureValuesTimeShift:
             date(2024, 6, 1): 600.0,
         }
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             resolver=lambda ctx: values.get(ctx.period.start, 0.0),
         ))
@@ -154,7 +154,7 @@ class TestTimeShiftedFormulaPython:
             (2024, 1): 1000.0,
         }
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             resolver=lambda ctx: values.get(
                 (ctx.period.start.year, ctx.period.start.month), 0.0
@@ -174,7 +174,7 @@ class TestTimeShiftedFormulaPython:
     def test_yoy_zero_prior_returns_zero(self, calendar):
         """Guard condition: if prior-year value is 0, formula returns 0.0."""
         r = MeasureRegistry()
-        r.register(BaseMeasure(name="Revenue", resolver=lambda ctx: 0.0))
+        r.register(Measure(name="Revenue", resolver=lambda ctx: 0.0))
         r.register(Measure(
             name="Revenue YoY %",
             dependencies=["Revenue"],
@@ -192,7 +192,7 @@ class TestTimeShiftedFormulaPython:
             (2024, 1): 1000.0, (2024, 2): 900.0,
         }
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             resolver=lambda ctx: values.get(
                 (ctx.period.start.year, ctx.period.start.month), 0.0
@@ -220,7 +220,7 @@ class TestTimeShiftedFormulaDuckDB:
         """Time-shifted lookup on the DuckDB path executes a scalar query for the
         prior-year period and memoizes the result."""
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             sql="SELECT * FROM gl",
             value_col="amount",
@@ -244,7 +244,7 @@ class TestTimeShiftedFormulaDuckDB:
         """After resolving a time-shifted formula, the prior-year Revenue entry
         must be in the memo cache — proving the scalar DuckDB result was stored."""
         r = MeasureRegistry()
-        r.register(BaseMeasure(
+        r.register(Measure(
             name="Revenue",
             sql="SELECT * FROM gl",
             value_col="amount",

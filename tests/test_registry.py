@@ -1,12 +1,21 @@
 import pytest
-from fpa import BaseMeasure, Measure, MeasureRegistry
+from fpa import Measure, MeasureRegistry
 
 
-def base(name, tags=None):
-    return BaseMeasure(name=name, resolver=lambda ctx: 0, tags=tags or [])
+def sql_measure(name, tags=None):
+    return Measure(
+        name=name,
+        sql=f"SELECT * FROM gl WHERE account_id = '{name}'",
+        value_col="amount",
+        tags=tags or [],
+    )
 
 
-def derived(name, deps, tags=None):
+def resolver_measure(name, tags=None):
+    return Measure(name=name, resolver=lambda ctx: 0, tags=tags or [])
+
+
+def formula_measure(name, deps, tags=None):
     return Measure(name=name, dependencies=deps, formula=lambda v: 0, tags=tags or [])
 
 
@@ -16,21 +25,21 @@ def derived(name, deps, tags=None):
 
 def test_register_and_get():
     r = MeasureRegistry()
-    m = base("Rev")
+    m = resolver_measure("Rev")
     r.register(m)
     assert r.get("Rev") is m
 
 
 def test_register_duplicate_raises():
     r = MeasureRegistry()
-    r.register(base("Rev"))
+    r.register(resolver_measure("Rev"))
     with pytest.raises(ValueError, match="already registered"):
-        r.register(base("Rev"))
+        r.register(resolver_measure("Rev"))
 
 
 def test_register_many():
     r = MeasureRegistry()
-    r.register_many([base("Rev"), base("COGS")])
+    r.register_many([resolver_measure("Rev"), resolver_measure("COGS")])
     assert "Rev" in r
     assert "COGS" in r
 
@@ -43,7 +52,7 @@ def test_get_missing_raises_key_error():
 
 def test_names():
     r = MeasureRegistry()
-    r.register_many([base("A"), base("B")])
+    r.register_many([resolver_measure("A"), resolver_measure("B")])
     assert set(r.names()) == {"A", "B"}
 
 
@@ -51,28 +60,34 @@ def test_names():
 # Filtered views
 # ---------------------------------------------------------------------------
 
-def test_base_measures_returns_only_base():
+def test_sql_measures_returns_only_sql():
     r = MeasureRegistry()
-    r.register_many([base("Rev"), derived("GP", ["Rev"])])
-    result = r.base_measures()
+    r.register_many([sql_measure("Rev"), formula_measure("GP", ["Rev"])])
+    result = r.sql_measures()
     assert len(result) == 1
     assert result[0].name == "Rev"
 
 
-def test_derived_measures_returns_only_derived():
+def test_formula_measures_returns_only_formula():
     r = MeasureRegistry()
-    r.register_many([base("Rev"), derived("GP", ["Rev"])])
-    result = r.derived_measures()
+    r.register_many([resolver_measure("Rev"), formula_measure("GP", ["Rev"])])
+    result = r.formula_measures()
     assert len(result) == 1
     assert result[0].name == "GP"
+
+
+def test_all_measures_returns_all():
+    r = MeasureRegistry()
+    r.register_many([resolver_measure("Rev"), formula_measure("GP", ["Rev"])])
+    assert len(r.all_measures()) == 2
 
 
 def test_by_tag():
     r = MeasureRegistry()
     r.register_many([
-        base("Rev", tags=["is"]),
-        base("COGS", tags=["is"]),
-        base("HC", tags=["headcount"]),
+        resolver_measure("Rev",  tags=["is"]),
+        resolver_measure("COGS", tags=["is"]),
+        resolver_measure("HC",   tags=["headcount"]),
     ])
     tagged = r.by_tag("is")
     assert {m.name for m in tagged} == {"Rev", "COGS"}
@@ -80,7 +95,7 @@ def test_by_tag():
 
 def test_by_tag_empty_result():
     r = MeasureRegistry()
-    r.register(base("Rev"))
+    r.register(resolver_measure("Rev"))
     assert r.by_tag("nonexistent") == []
 
 
@@ -90,18 +105,18 @@ def test_by_tag_empty_result():
 
 def test_contains():
     r = MeasureRegistry()
-    r.register(base("Rev"))
+    r.register(resolver_measure("Rev"))
     assert "Rev" in r
     assert "COGS" not in r
 
 
 def test_len():
     r = MeasureRegistry()
-    r.register_many([base("A"), base("B"), base("C")])
+    r.register_many([resolver_measure("A"), resolver_measure("B"), resolver_measure("C")])
     assert len(r) == 3
 
 
 def test_repr():
     r = MeasureRegistry()
-    r.register(base("Rev"))
+    r.register(resolver_measure("Rev"))
     assert "Rev" in repr(r)

@@ -1,54 +1,57 @@
 import pytest
-from fpa import BaseMeasure, Measure, AggType
+from fpa import Measure, AggType
 
 
 # ---------------------------------------------------------------------------
-# BaseMeasure
+# Validation — SQL path
 # ---------------------------------------------------------------------------
 
-def test_base_measure_requires_sql_or_resolver():
-    with pytest.raises(ValueError, match="requires either sql or resolver"):
-        BaseMeasure(name="Rev")
+def test_measure_requires_sql_formula_or_resolver():
+    with pytest.raises(ValueError, match="requires sql, formula, or resolver"):
+        Measure(name="Rev")
 
 
-def test_base_measure_sql_requires_value_col():
+def test_leaf_sql_requires_value_col():
     with pytest.raises(ValueError, match="value_col"):
-        BaseMeasure(
+        Measure(
             name="Rev",
             sql="SELECT * FROM gl WHERE account_type = 'Income'",
-            # value_col omitted
         )
 
 
-def test_base_measure_resolver_must_be_callable():
-    with pytest.raises(ValueError, match="resolver must be callable"):
-        BaseMeasure(
-            name="Rev",
+def test_composed_sql_does_not_require_value_col():
+    # measure.X reference means composed — value_col is inherited, not required
+    m = Measure(
+        name="SalesExp",
+        sql="SELECT * FROM measure.Expense WHERE department = 'Sales'",
+    )
+    assert m.sql
+    assert m.value_col == ""
+
+
+def test_sql_and_formula_raises():
+    with pytest.raises(ValueError, match="cannot combine sql with formula"):
+        Measure(
+            name="Bad",
             sql="SELECT * FROM gl",
             value_col="amount",
-            resolver="not_a_function",
+            formula=lambda v: 0,
+            dependencies=["X"],
         )
 
 
-def test_base_measure_sql_only_valid():
-    m = BaseMeasure(
-        name="Revenue",
-        sql="SELECT * FROM gl WHERE account_type = 'Income'",
-        value_col="amount",
-    )
-    assert m.sql == "SELECT * FROM gl WHERE account_type = 'Income'"
-    assert m.value_col == "amount"
-    assert m.resolver is None
+def test_sql_rejects_calculated_agg_type():
+    with pytest.raises(ValueError, match="CALCULATED"):
+        Measure(
+            name="Bad",
+            sql="SELECT * FROM gl",
+            value_col="amount",
+            agg_type=AggType.CALCULATED,
+        )
 
 
-def test_base_measure_resolver_only_valid():
-    m = BaseMeasure(name="Rev", resolver=lambda ctx: 42.0)
-    assert m.resolver(None) == 42.0
-    assert m.sql == ""
-
-
-def test_base_measure_both_sql_and_resolver_valid():
-    m = BaseMeasure(
+def test_sql_and_resolver_is_valid():
+    m = Measure(
         name="Rev",
         sql="SELECT * FROM gl",
         value_col="amount",
@@ -58,13 +61,42 @@ def test_base_measure_both_sql_and_resolver_valid():
     assert callable(m.resolver)
 
 
-def test_base_measure_default_agg_type():
-    m = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
-    assert m.agg_type == AggType.SUM
+def test_resolver_only_is_valid():
+    m = Measure(name="Rev", resolver=lambda ctx: 42.0)
+    assert m.resolver(None) == 42.0
+    assert m.sql == ""
 
 
-def test_base_measure_custom_agg_type():
-    m = BaseMeasure(
+# ---------------------------------------------------------------------------
+# Validation — Python formula path
+# ---------------------------------------------------------------------------
+
+def test_formula_requires_at_least_one_dependency():
+    with pytest.raises(ValueError, match="at least one dependency"):
+        Measure(name="GP", dependencies=[], formula=lambda v: 0)
+
+
+def test_formula_and_resolver_raises():
+    with pytest.raises(ValueError, match="cannot combine formula and resolver"):
+        Measure(
+            name="GP",
+            dependencies=["Rev"],
+            formula=lambda v: 0,
+            resolver=lambda ctx: 0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Defaults and field access
+# ---------------------------------------------------------------------------
+
+def test_agg_type_defaults_to_none():
+    m = Measure(name="Rev", resolver=lambda ctx: 0)
+    assert m.agg_type is None
+
+
+def test_custom_agg_type():
+    m = Measure(
         name="HC",
         sql="SELECT * FROM hc",
         value_col="headcount",
@@ -73,13 +105,13 @@ def test_base_measure_custom_agg_type():
     assert m.agg_type == AggType.LAST_DAY
 
 
-def test_base_measure_date_col_default_empty():
-    m = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
+def test_date_col_default_empty():
+    m = Measure(name="Rev", resolver=lambda ctx: 0)
     assert m.date_col == ""
 
 
-def test_base_measure_custom_date_col():
-    m = BaseMeasure(
+def test_custom_date_col():
+    m = Measure(
         name="Rev",
         sql="SELECT * FROM gl",
         value_col="amount",
@@ -88,56 +120,23 @@ def test_base_measure_custom_date_col():
     assert m.date_col == "period_enddate"
 
 
-def test_base_measure_tags_default_empty():
-    m = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
+def test_tags_default_empty():
+    m = Measure(name="Rev", resolver=lambda ctx: 0)
     assert m.tags == []
 
 
-def test_base_measure_tags_mutable_default_not_shared():
-    m1 = BaseMeasure(name="A", resolver=lambda ctx: 0)
-    m2 = BaseMeasure(name="B", resolver=lambda ctx: 0)
+def test_tags_mutable_default_not_shared():
+    m1 = Measure(name="A", resolver=lambda ctx: 0)
+    m2 = Measure(name="B", resolver=lambda ctx: 0)
     m1.tags.append("x")
     assert "x" not in m2.tags
 
 
-def test_base_measure_hash_by_name():
-    m1 = BaseMeasure(name="Rev", resolver=lambda ctx: 1)
-    m2 = BaseMeasure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
-    assert hash(m1) == hash(m2)
-
-
-def test_base_measure_equality_by_name():
-    m1 = BaseMeasure(name="Rev", resolver=lambda ctx: 1)
-    m2 = BaseMeasure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
-    assert m1 == m2
-
-
-def test_base_measure_inequality_different_name():
-    m1 = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
-    m2 = BaseMeasure(name="COGS", resolver=lambda ctx: 0)
-    assert m1 != m2
-
-
-def test_base_measure_not_equal_to_non_measure():
-    m = BaseMeasure(name="Rev", resolver=lambda ctx: 0)
-    assert m != "Rev"
-
-
 # ---------------------------------------------------------------------------
-# Measure
+# Formula behaviour
 # ---------------------------------------------------------------------------
 
-def test_measure_requires_at_least_one_dependency():
-    with pytest.raises(ValueError, match="at least one dependency"):
-        Measure(name="GP", dependencies=[], formula=lambda v: 0)
-
-
-def test_measure_requires_callable_formula():
-    with pytest.raises(ValueError, match="formula must be callable"):
-        Measure(name="GP", dependencies=["Revenue"], formula="not_a_function")
-
-
-def test_measure_formula_called_with_dep_values():
+def test_formula_called_with_dep_values():
     m = Measure(
         name="GP",
         dependencies=["Revenue", "COGS"],
@@ -146,24 +145,44 @@ def test_measure_formula_called_with_dep_values():
     assert m.formula({"Revenue": 100, "COGS": 60}) == 40
 
 
-def test_measure_default_agg_type_is_calculated():
-    m = Measure(name="GM%", dependencies=["GP", "Rev"], formula=lambda v: 0)
-    assert m.agg_type == AggType.CALCULATED
+# ---------------------------------------------------------------------------
+# Equality and hashing (name-based)
+# ---------------------------------------------------------------------------
 
-
-def test_measure_hash_by_name():
-    m1 = Measure(name="GP", dependencies=["Rev"], formula=lambda v: 0)
-    m2 = Measure(name="GP", dependencies=["COGS"], formula=lambda v: 1)
+def test_hash_by_name():
+    m1 = Measure(name="Rev", resolver=lambda ctx: 1)
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
     assert hash(m1) == hash(m2)
 
 
-def test_measure_equality_by_name():
-    m1 = Measure(name="GP", dependencies=["Rev"], formula=lambda v: 0)
-    m2 = Measure(name="GP", dependencies=["COGS"], formula=lambda v: 1)
+def test_equality_by_name():
+    m1 = Measure(name="Rev", resolver=lambda ctx: 1)
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
     assert m1 == m2
 
 
-def test_measure_not_equal_to_base_measure():
-    derived = Measure(name="GP", dependencies=["Rev"], formula=lambda v: 0)
-    base = BaseMeasure(name="GP", resolver=lambda ctx: 0)
-    assert derived != base
+def test_inequality_different_names():
+    m1 = Measure(name="Rev", resolver=lambda ctx: 0)
+    m2 = Measure(name="COGS", resolver=lambda ctx: 0)
+    assert m1 != m2
+
+
+def test_not_equal_to_non_measure():
+    m = Measure(name="Rev", resolver=lambda ctx: 0)
+    assert m != "Rev"
+
+
+def test_name_deduplication_in_set():
+    m1 = Measure(name="Rev", resolver=lambda ctx: 0)
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
+    assert len({m1, m2}) == 1
+
+
+# ---------------------------------------------------------------------------
+# Immutability
+# ---------------------------------------------------------------------------
+
+def test_measure_is_immutable():
+    m = Measure(name="Rev", resolver=lambda ctx: 1.0)
+    with pytest.raises(Exception):  # FrozenInstanceError
+        m.resolver = lambda ctx: 999.0  # type: ignore[misc]

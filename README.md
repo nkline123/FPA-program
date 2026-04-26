@@ -3,11 +3,11 @@
 A DuckDB-centric Python library for resolving financial measures across time
 periods and scenarios.
 
-Base measures are defined as SQL filter queries.  The engine wraps them as
-subqueries, appends date / scenario / dimension filters automatically, and
-executes one query per base measure — enabling high-cardinality GROUP BY
-breakdowns without parameter-list explosion.  Derived measures (ratios,
-subtotals) are computed as vectorized pandas operations on the query result.
+Measures are defined as SQL queries or Python formulas.  SQL measures compose
+on top of each other via `measure.<name>` references — the engine builds a
+CTE chain so parent measures are available without re-scanning source tables.
+The engine injects date, scenario, and dimension filters automatically and
+executes one CTE-chained query per SQL measure covering all periods at once.
 
 ## Documentation
 
@@ -15,7 +15,7 @@ subtotals) are computed as vectorized pandas operations on the query result.
 |---|---|
 | [OVERVIEW.md](OVERVIEW.md) | Concepts, design philosophy, execution paths |
 | [USAGE.md](USAGE.md) | Full API reference with examples |
-| [AI_CONTEXT.md](AI_CONTEXT.md) | Terse reference for AI assistants and code generation |
+| [REFERENCE.md](REFERENCE.md) | Terse cheatsheet for quick lookup |
 | [smoke_test.py](smoke_test.py) | Working end-to-end example with sample data |
 
 ## Install
@@ -42,23 +42,23 @@ import duckdb
 con = duckdb.connect("warehouse.duckdb")
 calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 
-# Define measures as SQL filter queries
 registry = fpa.MeasureRegistry()
 registry.register_many([
-    fpa.BaseMeasure(
+    # Leaf SQL measure — reads directly from a table
+    fpa.Measure(
         name="Revenue",
         sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
         value_col="amount",
         date_col="period_enddate",
         agg_type=fpa.AggType.SUM,
     ),
-    fpa.BaseMeasure(
-        name="COGS",
-        sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
-        value_col="amount",
-        date_col="period_enddate",
-        agg_type=fpa.AggType.SUM,
+    # Composed SQL measure — filters on top of Revenue without re-scanning gl
+    fpa.Measure(
+        name="North Revenue",
+        sql="SELECT * FROM measure.Revenue WHERE entity = 'North'",
+        # value_col / date_col / agg_type inherited from Revenue
     ),
+    # Python formula measure — calculated from resolved values
     fpa.Measure(
         name="Gross Profit",
         dependencies=["Revenue", "COGS"],
@@ -75,44 +75,41 @@ calc = fpa.Calculator(registry, connection=con)
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
 # P&L table — measures as rows, months as columns
-# Runs via DuckDB: one query per base measure, all periods in one scan
 table = calc.build_table(
-    ["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
+    ["Revenue", "North Revenue", "Gross Profit", "Gross Margin %"],
     months,
     scenario="Actual",
 )
 
-# Dimension breakdown — one query per base measure, GROUP BY dimension
-# Omit dimension_values to return every group in the data (no IN clause —
-# safe for high-cardinality dimensions with 100K+ distinct values)
-by_dept = calc.build_breakdown_table(
-    "Gross Margin %",
+# Dimension breakdown — GROUP BY entity, all periods in one query
+by_entity = calc.build_breakdown_table(
+    "Gross Profit",
     months,
     scenario="Actual",
-    dimension="department",
+    dimension="entity",
 )
 ```
 
 ## How it works
 
-For each `BaseMeasure`, the engine generates SQL like this — one query
-covers all periods via `FILTER (WHERE date_col BETWEEN … AND …)`:
+For each leaf SQL measure, the engine builds a CTE chain.  Composed measures
+reference parent CTEs via `"MeasureName"` identifiers — all in one `WITH`
+clause.  One query covers every requested period via `FILTER` aggregations:
 
 ```sql
-SELECT department,
+WITH "Revenue" AS (
+    SELECT * FROM general_ledger WHERE account_type = 'Income'
+),
+"North Revenue" AS (
+    SELECT * FROM "Revenue" WHERE entity = 'North'
+)
+SELECT
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
     ...
-FROM (SELECT * FROM general_ledger WHERE account_type = 'Income') __base
-WHERE scenario = ?
-GROUP BY department
+FROM "North Revenue"
+WHERE "scenario" = ?
 ```
-
-DuckDB's columnar `GROUP BY` handles 100K+ distinct dimension values natively —
-no IN-clause explosion, no Python loop over dimension values.
-
-Derived measures (`Gross Profit`, `Gross Margin %`) are computed as vectorized
-pandas operations on the returned DataFrame.
 
 ## Running Tests
 

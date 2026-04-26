@@ -11,7 +11,7 @@ import pytest
 import duckdb
 
 from fpa import (
-    BaseMeasure, Measure, MeasureRegistry, Calculator,
+    Measure, MeasureRegistry, Calculator,
     CalculationContext, FiscalCalendar, AggType,
 )
 from fpa.engine.calculator import Calculator as _Calculator
@@ -65,13 +65,13 @@ def test_stale_dag_detected_when_measure_replaced_at_same_count(calendar):
     and triggers a DAG rebuild, raising a descriptive ValueError.
     """
     r = MeasureRegistry()
-    r.register(BaseMeasure(name="A", resolver=lambda ctx: 1.0))
+    r.register(Measure(name="A", resolver=lambda ctx: 1.0))
     r.register(Measure(name="B", dependencies=["A"], formula=lambda v: v["A"] * 2))
     calc = Calculator(r)
 
     # Swap "A" for "C" — length unchanged, but name-set differs
     r._measures.pop("A")
-    r._measures["C"] = BaseMeasure(name="C", resolver=lambda ctx: 5.0)
+    r._measures["C"] = Measure(name="C", resolver=lambda ctx: 5.0)  # noqa: bypass register
 
     with pytest.raises(ValueError, match="not registered"):
         calc.resolve("B", make_context(calendar))
@@ -89,9 +89,9 @@ def test_sample_employee_generator_exists():
 # Issue 3 — AggType.CALCULATED is rejected at BaseMeasure construction time
 # ---------------------------------------------------------------------------
 
-def test_base_measure_rejects_calculated_agg_type():
+def test_sql_measure_rejects_calculated_agg_type():
     with pytest.raises(ValueError, match="CALCULATED"):
-        BaseMeasure(
+        Measure(
             name="Bad",
             sql="SELECT * FROM gl",
             value_col="amount",
@@ -103,16 +103,16 @@ def test_base_measure_rejects_calculated_agg_type():
 # Issue 4 — BaseMeasure is frozen (immutable after construction)
 # ---------------------------------------------------------------------------
 
-def test_base_measure_is_immutable():
-    m = BaseMeasure(name="Revenue", resolver=lambda ctx: 1.0)
+def test_measure_is_immutable():
+    m = Measure(name="Revenue", resolver=lambda ctx: 1.0)
     with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
         m.resolver = lambda ctx: 999.0  # type: ignore[misc]
 
 
-def test_two_base_measures_with_same_name_are_equal_despite_different_sql():
+def test_two_measures_with_same_name_are_equal_despite_different_sql():
     """Name-based equality is intentional — the registry relies on it for deduplication."""
-    m1 = BaseMeasure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='4000'", value_col="amount")
-    m2 = BaseMeasure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='9999'", value_col="amount")
+    m1 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='4000'", value_col="amount")
+    m2 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='9999'", value_col="amount")
 
     assert m1 == m2
     assert hash(m1) == hash(m2)
@@ -128,7 +128,7 @@ def test_two_base_measures_with_same_name_are_equal_despite_different_sql():
 def test_table_parameter_raises_type_error(con):
     """Passing the removed `table` kwarg now raises TypeError immediately."""
     r = MeasureRegistry()
-    r.register(BaseMeasure(
+    r.register(Measure(
         name="Revenue",
         sql="SELECT * FROM gl WHERE account_id = '4000'",
         value_col="amount",

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import duckdb
 import pandas as pd
+from datetime import date
 from pathlib import Path
 import runpy
 import fpa
@@ -54,7 +55,7 @@ print(f"GL columns: {gl_cols}")
 # --- 3. Define measures ---
 registry = fpa.MeasureRegistry()
 registry.register_many([
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="Revenue",
         # Revenue accounts use credit convention (negative amounts in GL).
         # Negate in the subquery so SUM returns a positive revenue figure.
@@ -68,7 +69,7 @@ registry.register_many([
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="COGS",
         sql="SELECT * FROM gl WHERE account_id IN ('5000', '5010')",
         value_col="amount",
@@ -76,7 +77,7 @@ registry.register_many([
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="OpEx",
         sql="SELECT * FROM gl WHERE account_id IN ('6000','6010','6020','6030','6040')",
         value_col="amount",
@@ -84,7 +85,7 @@ registry.register_many([
         agg_type=fpa.AggType.SUM,
         tags=["income_statement"],
     ),
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="InterestExpense",
         sql="SELECT * FROM gl WHERE account_id = '7000'",
         value_col="amount",
@@ -198,13 +199,13 @@ for entity in gm_breakdown.index:
 print("\n--- Python resolver fallback (no DuckDB connection) ---")
 py_registry = fpa.MeasureRegistry()
 py_registry.register_many([
-    fpa.BaseMeasure(name="Revenue",  resolver=lambda ctx: 850_000.0),
-    fpa.BaseMeasure(name="COGS",     resolver=lambda ctx: 340_000.0),
+    fpa.Measure(name="Revenue",  resolver=lambda ctx: 850_000.0),
+    fpa.Measure(name="COGS",     resolver=lambda ctx: 340_000.0),
     fpa.Measure(name="Gross Profit", dependencies=["Revenue", "COGS"],
                 formula=lambda v: v["Revenue"] - v["COGS"]),
 ])
 py_calc = fpa.Calculator(py_registry)  # no connection
-jan = calendar.month_period(__import__("datetime").date(2024, 1, 1))
+jan = calendar.month_period(date(2024, 1, 1))
 ctx = fpa.CalculationContext.make(period=jan, scenario="Actual")
 print(f"  Revenue:      {py_calc.resolve('Revenue', ctx):>12,.0f}")
 print(f"  Gross Profit: {py_calc.resolve('Gross Profit', ctx):>12,.0f}")

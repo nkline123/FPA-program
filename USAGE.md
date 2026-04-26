@@ -1,11 +1,12 @@
 # FPA Library — Usage Guide
 
 A DuckDB-centric Python library for resolving financial measures across time
-periods and scenarios.  Base measures are defined as SQL filter queries; the
-engine handles date filtering, scenario filtering, and GROUP BY automatically.
+periods and scenarios.  Measures are defined as SQL queries or Python formulas;
+the engine handles date filtering, scenario filtering, CTE chaining, and GROUP
+BY automatically.
 
 For concepts and design rationale, see [OVERVIEW.md](OVERVIEW.md).
-For a terse AI-facing reference, see [AI_CONTEXT.md](AI_CONTEXT.md).
+For a terse cheatsheet, see [REFERENCE.md](REFERENCE.md).
 
 ---
 
@@ -40,14 +41,14 @@ calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 # 2. Define measures
 registry = fpa.MeasureRegistry()
 registry.register_many([
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="Revenue",
         sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
         value_col="amount",
         date_col="period_enddate",
         agg_type=fpa.AggType.SUM,
     ),
-    fpa.BaseMeasure(
+    fpa.Measure(
         name="COGS",
         sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
         value_col="amount",
@@ -128,21 +129,6 @@ ytd         = calendar.ytd_periods(march)      # [Jan, Feb, Mar 2024]
 rolling_12  = calendar.rolling_periods(aug, 12)
 ```
 
-### Shifting a period
-
-`shift()` returns a new period offset by N months from the source period's
-start date.  Grain is preserved by default; pass a target grain to cross grain
-boundaries.
-
-```python
-calendar.shift(jan_2024, -1)                    # Dec 2023  (monthly → monthly)
-calendar.shift(jan_2024, -12)                   # Jan 2023  (one year back)
-calendar.shift(q2_2024, -3)                     # FY2024 Q1 (quarter → quarter)
-calendar.shift(q2_2024,  0, fpa.Grain.MONTH)   # Apr 2024  (quarter → first month)
-calendar.shift(q2_2024,  1, fpa.Grain.MONTH)   # May 2024  (quarter → second month)
-calendar.shift(q2_2024,  2, fpa.Grain.MONTH)   # Jun 2024  (quarter → third month)
-```
-
 ### Period attributes
 
 ```python
@@ -160,15 +146,20 @@ period.calendar_month    # int
 
 ## Measures
 
-### BaseMeasure — data from DuckDB
+All measures use the single `fpa.Measure` class.  The execution path is
+determined by which fields are set.
+
+### Leaf SQL measure — data from DuckDB
 
 ```python
-fpa.BaseMeasure(
+fpa.Measure(
     name="Revenue",
     sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
-    value_col="amount",           # column to aggregate
+    value_col="amount",           # column to aggregate (required for leaf measures)
     date_col="period_enddate",    # column for date-range filtering
     agg_type=fpa.AggType.SUM,    # how value_col is aggregated per period
+    scenario_col="scenario",      # column holding the scenario label (default: "scenario")
+    scenario="Actual",            # lock this measure to a specific scenario (optional)
     tags=["income_statement"],
     description="Total product revenue",
 )
@@ -180,13 +171,11 @@ NOT include WHERE conditions for date range, scenario, or dimension values —
 those are appended by the engine automatically.  Trailing semicolons are
 stripped automatically.
 
-**value_col** is the numeric column to aggregate.  Required when `sql` is set.
+**value_col** is the numeric column to aggregate.  Required on leaf measures
+(those without `measure.<name>` references in their SQL).
 
 **date_col** is the date column used for period filtering.  Defaults to the
-Calculator's `date_col` argument if not set on the measure.  If `date_col`
-does not match an actual column in the query result, the `FILTER` clause
-matches no rows and every cell silently returns 0.  Always verify the column
-name against your table schema.
+Calculator's `date_col` argument if not set on the measure.
 
 **agg_type** controls the SQL aggregation function:
 
@@ -194,23 +183,76 @@ name against your table schema.
 |---|---|---|
 | `SUM` | `COALESCE(SUM(value_col) FILTER (WHERE …), 0)` | Revenue, Expenses |
 | `AVERAGE` | `COALESCE(AVG(value_col) FILTER (WHERE …), 0)` | Average Price |
-| `LAST_DAY` | `arg_max(value_col, date_col) FILTER (WHERE …)` | Headcount, ARR, Balance |
-| `CALCULATED` | not valid for BaseMeasure | — |
+| `LAST_DAY` | `arg_max(value_col, date_col) FILTER (WHERE …)` | Headcount, ARR snapshot |
+| `CUMULATIVE_END` | `COALESCE(SUM(value_col) FILTER (WHERE date <= period_end), 0)` | Balance sheet closing |
+| `CUMULATIVE_START` | `COALESCE(SUM(value_col) FILTER (WHERE date < period_start), 0)` | Balance sheet opening |
+| `CALCULATED` | not valid for SQL measures | — |
 
-**resolver** is an optional Python callable `(CalculationContext) → float`.
-Provide one if you need the library to work without a DuckDB connection (e.g.
-unit tests, offline environments).  Return `None` to treat the value as 0.0.
+`CUMULATIVE_END` and `CUMULATIVE_START` accumulate all transactions from the
+beginning of history to the period boundary — use them for balance sheet
+accounts sourced from a GL transaction table.  The invariant
+`CUMULATIVE_END - CUMULATIVE_START == SUM` holds for any period.
 
-### Measure — calculated from other measures
+**scenario** locks this measure to a specific scenario value.  When set, the
+engine injects `WHERE "scenario_col" = 'Actual'` (or whichever value) for
+this measure regardless of what scenario is passed to `build_table`.  Useful
+for putting Actual and Budget measures in the same table call.
+
+**scenario_col** names the column that holds the scenario label.  Defaults to
+the Calculator's `scenario_col` argument (`"scenario"`).  Set this when your
+table uses a different column name.
+
+### Composed SQL measure — filtering on top of another measure
+
+```python
+fpa.Measure(
+    name="Sales & Marketing Expense",
+    sql="SELECT * FROM measure.Expense WHERE department IN ('Sales', 'Marketing')",
+    # value_col / date_col / agg_type / scenario_col inherited from Expense
+)
+```
+
+Use `measure.<name>` in the SQL to reference another measure.  The engine
+replaces these references with quoted CTE identifiers and builds a `WITH`
+chain, so the parent measure's data is available without re-scanning the
+source table.
+
+> **Constraint:** Measure names used in `measure.<name>` references must
+> contain only word characters (`[a-zA-Z0-9_]`).  Names with spaces or special
+> characters can be registered and used as formula `dependencies`, but cannot
+> be referenced via `measure.<name>` in SQL.
+
+Composed measures inherit `value_col`, `date_col`, `agg_type`, and
+`scenario_col` from the nearest SQL ancestor that defines them.  Override any
+field on the composed measure when the aggregation genuinely changes (e.g.
+switching from `SUM` to `LAST_DAY`).
+
+You can add dimensions via join in a composed measure:
+
+```python
+fpa.Measure(
+    name="Expense with Region",
+    sql="""
+        SELECT e.*, d.region
+        FROM measure.Expense e
+        JOIN dim_department d ON e.department = d.department
+    """,
+)
+```
+
+### Python formula measure — calculated from other measures
 
 ```python
 fpa.Measure(
     name="Gross Profit",
     dependencies=["Revenue", "COGS"],
     formula=lambda v: v["Revenue"] - v["COGS"],
-    agg_type=fpa.AggType.CALCULATED,  # default
-    tags=["income_statement"],
-    description="Revenue minus cost of goods sold",
+)
+
+fpa.Measure(
+    name="Gross Margin %",
+    dependencies=["Gross Profit", "Revenue"],
+    formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100) if v["Revenue"] else 0.0,
 )
 ```
 
@@ -219,38 +261,60 @@ dependency.  It behaves like a dict for plain lookups and adds two extra
 capabilities:
 
 ```python
-v["Revenue"]                   # current period value (plain lookup)
-v["Revenue", -12]              # Revenue 12 months prior, same grain
-v["Revenue", 0, fpa.Grain.MONTH]  # Revenue for start-of-period month (cross-grain)
-v.period                       # the Period being resolved — grain, start, end, label
-v.scenario                     # the scenario string
+v["Revenue"]                          # current period value
+v["Revenue", -12]                     # Revenue 12 months prior, same grain
+v["Revenue", 0, fpa.Grain.MONTH]     # Revenue for start-of-period month (cross-grain)
+v.period                              # the Period being resolved
+v.scenario                            # the scenario string
 ```
 
-See [Time-Shifted Measures](#time-shifted-measures) for full details.
+**Python conditional formulas** work naturally.  On the DuckDB path the
+library attempts vectorized pandas arithmetic first and falls back to
+row-wise `.apply()` automatically for formulas that use conditionals,
+time-shifted lookups, or `v.period`.
 
-**Python conditional formulas** work naturally:
-```python
-formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100) if v["Revenue"] else 0.0
-```
-On the DuckDB path, the library attempts vectorized pandas arithmetic first
-and falls back to row-wise `.apply()` automatically for formulas that use
-conditionals, time-shifted lookups, or `v.period`.
+### Balance sheet measures (CUMULATIVE_END / CUMULATIVE_START)
 
-### Headcount (AggType.LAST_DAY)
+For accounts like Assets or Liabilities sourced from GL transactions:
 
 ```python
-fpa.BaseMeasure(
-    name="Headcount",
-    sql="SELECT * FROM hr_snapshots WHERE status = 'Active'",
-    value_col="employee_count",
-    date_col="snapshot_date",
-    agg_type=fpa.AggType.LAST_DAY,
+fpa.Measure(
+    name="Assets",
+    sql="SELECT * FROM gl WHERE account_id = '1000'",
+    value_col="amount",
+    date_col="date",
+    agg_type=fpa.AggType.CUMULATIVE_END,   # closing balance at end of period
+)
+
+fpa.Measure(
+    name="Assets Opening",
+    sql="SELECT * FROM gl WHERE account_id = '1000'",
+    value_col="amount",
+    date_col="date",
+    agg_type=fpa.AggType.CUMULATIVE_START,  # opening balance at start of period
 )
 ```
 
-`arg_max(employee_count, snapshot_date)` returns the headcount from the row
-with the latest `snapshot_date` within the period — the correct period-end
-snapshot for stock measures.
+### Scenario-locked measures
+
+```python
+fpa.Measure(
+    name="Actual Revenue",
+    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
+    scenario="Actual",   # always returns Actual, regardless of build_table scenario
+)
+
+fpa.Measure(
+    name="Budget Revenue",
+    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
+    scenario="Budget",
+)
+
+# Both can be in the same build_table call
+calc.build_table(["Actual Revenue", "Budget Revenue"], months, scenario="Actual")
+```
 
 ---
 
@@ -261,11 +325,12 @@ registry = fpa.MeasureRegistry()
 registry.register(revenue)                   # one measure
 registry.register_many([rev, cogs, gp, gm])  # many at once
 
-measure = registry.get("Revenue")            # → BaseMeasure or Measure (KeyError if missing)
-names   = registry.names()                   # → List[str]
-bases   = registry.base_measures()           # → List[BaseMeasure]
-derived = registry.derived_measures()        # → List[Measure]
-tagged  = registry.by_tag("income_statement")# → List[AnyMeasure]
+measure  = registry.get("Revenue")           # → Measure (KeyError if missing)
+names    = registry.names()                  # → List[str]
+all_m    = registry.all_measures()           # → List[Measure]
+sql_m    = registry.sql_measures()           # → List[Measure] — those with sql set
+formula  = registry.formula_measures()       # → List[Measure] — those with formula set
+tagged   = registry.by_tag("income_statement")  # → List[Measure]
 
 "Revenue" in registry                        # → bool
 len(registry)                                # → int
@@ -284,9 +349,9 @@ calendar = fpa.FiscalCalendar(fiscal_year_start_month=1)
 calc = fpa.Calculator(
     registry,
     connection=con,          # open duckdb.DuckDBPyConnection
-    date_col="date",         # default date column (overridden per-measure by BaseMeasure.date_col)
-    scenario_col="scenario", # default "scenario"
-    calendar=calendar,       # required for time-shifted lookups in Measure formulas
+    date_col="date",         # default date column (overridden per-measure by Measure.date_col)
+    scenario_col="scenario", # default scenario column (overridden per-measure by Measure.scenario_col)
+    calendar=calendar,       # required for time-shifted lookups in formula measures
 )
 ```
 
@@ -300,22 +365,9 @@ ctx = fpa.CalculationContext.make(
 value = calc.resolve("Revenue", ctx)   # → float (memoized)
 ```
 
-Works for both SQL-backed and resolver-only measures.  When a connection is
-present, SQL-backed measures execute a single-period DuckDB query.
-
-### Resolve multiple measures (Python path)
-
-```python
-values = calc.resolve_many(["Revenue", "COGS", "Gross Profit"], ctx)
-# → {"Revenue": 850000.0, "COGS": 340000.0, "Gross Profit": 510000.0}
-```
-
 ### build_table — measures × periods
 
 Returns a `pd.DataFrame` with measures as rows and period labels as columns.
-
-Uses the DuckDB path when a connection is present.  One SQL query per base
-measure; derived measures computed in pandas.
 
 ```python
 months = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
@@ -324,7 +376,8 @@ table = calc.build_table(
     measure_names=["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
     periods=months,
     scenario="Actual",
-    entity="North",     # optional fixed filters applied to every query
+    entity="North",              # optional scalar filter → WHERE "entity" = ?
+    department=["Sales", "Mktg"] # optional IN filter → WHERE "department" IN (?, ?)
 )
 # table.loc["Revenue", "Jan 2024"]  → float
 ```
@@ -335,7 +388,7 @@ Returns a `pd.DataFrame` with dimension values as rows and period labels as
 columns.
 
 ```python
-# With explicit dimension_values — results filtered to those values
+# With explicit dimension_values — results filtered and reindexed to those values
 breakdown = calc.build_breakdown_table(
     measure_name="Gross Profit",
     periods=months,
@@ -351,16 +404,11 @@ breakdown = calc.build_breakdown_table(
     periods=months,
     scenario="Actual",
     dimension="customer_id",
-    # dimension_values omitted
 )
 
 # breakdown.loc["Engineering", "Jan 2024"]  → float
-# Missing dimension values return 0.0 — no KeyError
+# Missing dimension values return 0.0
 ```
-
-Supported measure types: any base or derived measure.  Pass `"Gross Margin %"`
-and the engine traces the DAG, fetches Revenue and COGS via SQL, then
-computes Gross Profit and Gross Margin % per dimension group.
 
 ### Scenario comparison
 
@@ -388,44 +436,49 @@ resolvers on the Python path.
 ctx = fpa.CalculationContext.make(
     period=calendar.month_period(date(2024, 3, 1)),
     scenario="Budget",
-    entity="North",       # any keyword args become filters
-    department="Sales",
+    entity="North",            # any keyword args become filters
+    department=["Sales", "Mktg"],  # list values → tuple, generates IN clause
 )
 
 # Inside a resolver
 ctx.period    # Period object
 ctx.scenario  # str
-ctx.get("entity")      # → "North"  (None if not set)
-ctx.get("missing", 0)  # → 0
-ctx.filters            # tuple of sorted (key, value) pairs — use .get()
+ctx.get("entity")         # → "North"
+ctx.get("department")     # → ("Sales", "Mktg")  — lists stored as tuples
+ctx.get("missing", 0)     # → 0
+ctx.filters               # tuple of sorted (key, value) pairs — use .get()
 ```
 
 ---
 
 ## Generated SQL
 
-For a `build_breakdown_table("Revenue", months, scenario="Actual", dimension="department")` call,
-the engine executes one query per base measure in the dependency chain.  For Revenue:
+For a CTE-chained query the engine builds a `WITH` clause walking up the
+`measure.<name>` reference graph, then selects `FILTER` aggregations per
+period from the terminal measure:
 
 ```sql
-SELECT "department",
+-- build_breakdown_table("S&M Expense", months, scenario="Actual", dimension="entity")
+
+WITH "Expense" AS (
+    SELECT * FROM general_ledger WHERE account_id IN ('6000','6010')
+),
+"S&M Expense" AS (
+    SELECT * FROM "Expense" WHERE department IN ('Sales', 'Marketing')
+)
+SELECT "entity",
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
     ...
-FROM (SELECT * FROM general_ledger WHERE account_type = 'Income') __base
+FROM "S&M Expense"
 WHERE "scenario" = ?
-GROUP BY "department"
+GROUP BY "entity"
 ```
 
-For LAST_DAY (headcount):
+For `CUMULATIVE_END` the `FILTER` uses `<=` instead of `BETWEEN`:
 
 ```sql
-SELECT "department",
-    arg_max(employee_count, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024-01-01' AND '2024-01-31') AS "Jan 2024",
-    ...
-FROM (SELECT * FROM hr_snapshots WHERE status = 'Active') __base
-WHERE "scenario" = ?
-GROUP BY "department"
+COALESCE(SUM(amount) FILTER (WHERE date <= '2024-01-31'), 0.0) AS "Jan 2024"
 ```
 
 Period start/end dates are embedded as ISO literals (they come from
@@ -444,8 +497,8 @@ tuple indexing on `v`.  This requires passing `calendar=` to `Calculator`.
 ```python
 v["Revenue"]                          # current period (plain lookup)
 v["Revenue", -12]                     # 12 months prior, same grain
-v["Revenue", -3]                      # 3 months prior (= previous quarter when grain is QUARTER)
-v["Revenue", -1]                      # 1 month prior (= previous month when grain is MONTH)
+v["Revenue", -3]                      # 3 months prior
+v["Revenue", -1]                      # 1 month prior
 v["Revenue", 0,  fpa.Grain.MONTH]    # first month of current period (cross-grain)
 v["Revenue", 1,  fpa.Grain.MONTH]    # second month of current period
 v["Revenue", -1, fpa.Grain.MONTH]    # month before current period starts
@@ -465,68 +518,12 @@ fpa.Measure(
 )
 
 fpa.Measure(
-    name="Revenue QoQ %",   # use with quarterly periods
-    dependencies=["Revenue"],
-    formula=lambda v: (v["Revenue"] / v["Revenue", -3] - 1) * 100
-                      if v["Revenue", -3] else 0.0,
-)
-
-fpa.Measure(
-    name="Revenue MoM %",   # use with monthly periods
+    name="Revenue MoM %",
     dependencies=["Revenue"],
     formula=lambda v: (v["Revenue"] / v["Revenue", -1] - 1) * 100
                       if v["Revenue", -1] else 0.0,
 )
 ```
-
-### v.period — grain-aware formulas
-
-`v.period` exposes the `Period` being resolved, letting a single formula adapt
-to any grain.
-
-```python
-_GRAIN_MONTHS = {
-    fpa.Grain.MONTH:   1,
-    fpa.Grain.QUARTER: 3,
-    fpa.Grain.YEAR:    12,
-}
-
-def _lagged_sm(v):
-    """S&M summed over the months that precede each month of the current period by 1."""
-    if v.period.grain == fpa.Grain.MONTH:
-        return v["S&M", -1]
-    elif v.period.grain == fpa.Grain.QUARTER:
-        return sum(v["S&M", i, fpa.Grain.MONTH] for i in range(-1, 2))
-    else:  # YEAR
-        return sum(v["S&M", i, fpa.Grain.MONTH] for i in range(-1, 11))
-
-fpa.Measure(name="Lagged S&M", dependencies=["S&M"], formula=_lagged_sm)
-```
-
-The offset range `range(-1, n-1)` produces `n` monthly values starting one
-month before the period — a 1-month conversion lag.  Change `-1` to `-2` for a
-2-month lag.
-
-### Cross-grain breakdown
-
-The three-argument form lets quarterly or annual formulas inspect individual
-months within (or around) a period:
-
-```python
-# From Q2 2024:  v["Revenue", 0, Grain.MONTH]  → Apr 2024
-#                v["Revenue", 1, Grain.MONTH]  → May 2024
-#                v["Revenue", 2, Grain.MONTH]  → Jun 2024
-#                v["Revenue", -1, Grain.MONTH] → Mar 2024 (month before quarter)
-```
-
-### Dimension breakdowns with time-shifted measures
-
-Time-shifted measures work with `build_breakdown_table`.  Each dimension value
-resolves the lagged period independently via a parameterized DuckDB query, so
-North gets North's prior-year revenue and South gets South's.  The engine uses
-individual per-cell queries rather than the batch path for the lagged values,
-which is efficient for typical FP&A cardinality but may be slow for dimensions
-with thousands of distinct values.
 
 ---
 
@@ -534,8 +531,6 @@ with thousands of distinct values.
 
 Provide a `resolver` alongside `sql` if you need the library to work without
 a DuckDB connection.
-
-### Flow measure
 
 ```python
 def query_revenue(ctx):
@@ -546,43 +541,14 @@ def query_revenue(ctx):
           AND period_enddate BETWEEN ? AND ?
     """, [ctx.scenario, ctx.period.start, ctx.period.end]).scalar())
 
-fpa.BaseMeasure(
+fpa.Measure(
     name="Revenue",
     sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
     value_col="amount",
     date_col="period_enddate",
-    resolver=query_revenue,
+    agg_type=fpa.AggType.SUM,
+    resolver=query_revenue,   # used when no DuckDB connection
 )
-```
-
-### Resolver-only (no sql — Python path only)
-
-```python
-fpa.BaseMeasure(
-    name="Revenue",
-    resolver=lambda ctx: lookup[(ctx.scenario, ctx.get("entity"), ctx.period.label)],
-)
-```
-
-### Prior period reference (resolver approach)
-
-Prefer the `Measure` formula approach with `v["Revenue", -1]` described in
-[Time-Shifted Measures](#time-shifted-measures).  The resolver pattern below
-is still valid when you need prior-period logic inside a `BaseMeasure` resolver
-specifically — for example, when there is no DuckDB connection.
-
-```python
-def query_mom_growth(ctx):
-    prior_ctx = fpa.CalculationContext.make(
-        period=calendar.prior_period(ctx.period),
-        scenario=ctx.scenario,
-        **dict(ctx.filters),
-    )
-    current = calc.resolve("Revenue", ctx)
-    prior   = calc.resolve("Revenue", prior_ctx)
-    return ((current - prior) / prior * 100) if prior else 0.0
-
-registry.register(fpa.BaseMeasure(name="MoM Growth %", resolver=query_mom_growth))
 ```
 
 ---
@@ -592,9 +558,9 @@ registry.register(fpa.BaseMeasure(name="MoM Growth %", resolver=query_mom_growth
 | Condition | Path used |
 |---|---|
 | No `connection` on Calculator | Python resolver |
-| `connection` set, no base measure in chain has `sql` | Python resolver |
-| `connection` set, at least one base measure has `sql` | DuckDB |
-| Base measure has both `sql` and `resolver` | DuckDB (sql wins with connection) |
+| `connection` set, no SQL measure in chain | Python resolver |
+| `connection` set, at least one SQL measure in chain | DuckDB |
+| Measure has both `sql` and `resolver` | DuckDB (sql wins with connection) |
 
 ---
 

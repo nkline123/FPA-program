@@ -2,10 +2,9 @@
 FPA — Financial Planning & Analysis library.
 
 A DuckDB-centric calculation engine for financial metrics across time periods
-and scenarios.  Base measures are defined as SQL filter queries; the engine
-wraps them as subqueries, appends date / scenario / dimension filters
-automatically, and executes one query per base measure per call — enabling
-high-cardinality GROUP BY breakdowns without parameter-list explosion.
+and scenarios.  Measures are defined as SQL queries or Python formulas; the
+engine builds CTE-chained queries covering all periods simultaneously and
+supports SQL composition via ``measure.<name>`` references.
 
     import fpa
     import duckdb
@@ -15,24 +14,17 @@ high-cardinality GROUP BY breakdowns without parameter-list explosion.
 
     registry = fpa.MeasureRegistry()
     registry.register_many([
-        fpa.BaseMeasure(
-            name="Revenue",
-            sql="SELECT * FROM general_ledger WHERE account_type = 'Income'",
+        fpa.Measure(
+            name="Expense",
+            sql="SELECT * FROM gl WHERE account_id IN ('6000','6010')",
             value_col="amount",
-            date_col="period_enddate",
-            agg_type=fpa.AggType.SUM,
-        ),
-        fpa.BaseMeasure(
-            name="COGS",
-            sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
-            value_col="amount",
-            date_col="period_enddate",
+            date_col="date",
             agg_type=fpa.AggType.SUM,
         ),
         fpa.Measure(
-            name="Gross Profit",
-            dependencies=["Revenue", "COGS"],
-            formula=lambda v: v["Revenue"] - v["COGS"],
+            name="Sales & Marketing",
+            sql="SELECT * FROM measure.Expense WHERE department IN ('Sales', 'Marketing')",
+            # value_col / date_col / agg_type inherited from Expense
         ),
         fpa.Measure(
             name="Gross Margin %",
@@ -45,19 +37,17 @@ high-cardinality GROUP BY breakdowns without parameter-list explosion.
     calc = fpa.Calculator(registry, connection=con)
     periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
-    # P&L table — measures as rows, months as columns
     table = calc.build_table(
-        ["Revenue", "COGS", "Gross Profit", "Gross Margin %"],
+        ["Expense", "Sales & Marketing", "Gross Margin %"],
         periods,
         scenario="Actual",
     )
 
-    # Dimension breakdown — one query per base measure, any number of groups
     by_dept = calc.build_breakdown_table(
         "Gross Margin %",
         periods,
         scenario="Actual",
-        dimension="department",   # dimension_values optional — returns all groups
+        dimension="department",
     )
 """
 
@@ -66,7 +56,7 @@ from .calendar.fiscal_calendar import FiscalCalendar
 from .calendar.period import Period, Grain, AggType
 
 # Measures
-from .measures.measure import BaseMeasure, Measure, AnyMeasure
+from .measures.measure import Measure, AnyMeasure
 from .measures.measure_registry import MeasureRegistry
 
 # Engine
@@ -80,7 +70,6 @@ __all__ = [
     "Grain",
     "AggType",
     # Measures
-    "BaseMeasure",
     "Measure",
     "AnyMeasure",
     "MeasureRegistry",

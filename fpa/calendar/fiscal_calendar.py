@@ -84,7 +84,7 @@ class FiscalCalendar:
         end = self._month_end(d)
         fy = self._fiscal_year_for_date(d)
         fp = self._fiscal_period_num_for_date(d)
-        label = f"{start.strftime('%b %Y')}"
+        label = start.strftime('%b %Y')
         return Period(
             grain=Grain.MONTH,
             start=start,

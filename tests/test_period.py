@@ -67,4 +67,4 @@ def test_agg_type_values():
     assert AggType.SUM.value == "sum"
     assert AggType.LAST_DAY.value == "last_day"
     assert AggType.AVERAGE.value == "average"
-    assert AggType.CALCULATED.value == "calc"
+    assert AggType.CALCULATED.value == "calculated"

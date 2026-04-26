@@ -11,10 +11,12 @@ class Grain(Enum):
 
 
 class AggType(Enum):
-    SUM = "sum"           # Flows: Revenue, Expenses
-    LAST_DAY = "last_day" # Stocks: Headcount, Cash Balance
-    AVERAGE = "average"   # Rates: Average Price
-    CALCULATED = "calc"   # Ratios: Gross Margin % — must recalculate, never aggregate
+    SUM               = "sum"               # Flows: Revenue, Expenses
+    LAST_DAY          = "last_day"          # Stocks: Headcount, snapshot tables
+    AVERAGE           = "average"           # Rates: Average Price
+    CUMULATIVE_END    = "cumulative_end"    # Balance at period end: Assets, Liabilities
+    CUMULATIVE_START  = "cumulative_start"  # Balance at period start: opening balance
+    CALCULATED        = "calculated"        # Ratios: Gross Margin % — never aggregate
 
 
 @dataclass(frozen=True)
