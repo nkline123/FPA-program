@@ -1,4 +1,4 @@
-"""
+﻿"""
 Smoke test — runs end-to-end through the full DuckDB-centric pipeline.
 
 Loads sample GL and headcount CSVs into an in-memory DuckDB database, defines
@@ -67,6 +67,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
         tags=["income_statement"],
     ),
     fpa.Measure(
@@ -75,6 +76,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
         tags=["income_statement"],
     ),
     fpa.Measure(
@@ -83,6 +85,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
         tags=["income_statement"],
     ),
     fpa.Measure(
@@ -91,6 +94,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
         tags=["income_statement"],
     ),
     fpa.Measure(

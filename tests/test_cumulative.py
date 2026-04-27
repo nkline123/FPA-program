@@ -67,6 +67,7 @@ def make_registry(agg_type):
         value_col="amount",
         date_col="date",
         agg_type=agg_type,
+        scenario_col="scenario",
     ))
     return r
 
@@ -217,11 +218,14 @@ class TestCumulativeInvariant:
         r = MeasureRegistry()
         r.register_many([
             Measure(name="AssetsClose", sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END,
+                    scenario_col="scenario"),
             Measure(name="AssetsOpen",  sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_START),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_START,
+                    scenario_col="scenario"),
             Measure(name="AssetsFlow",  sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.SUM),
+                    value_col="amount", date_col="date", agg_type=AggType.SUM,
+                    scenario_col="scenario"),
             Measure(name="NetChange",
                     dependencies=["AssetsClose", "AssetsOpen"],
                     formula=lambda v: v["AssetsClose"] - v["AssetsOpen"]),
@@ -242,11 +246,14 @@ class TestCumulativeInvariant:
         r = MeasureRegistry()
         r.register_many([
             Measure(name="Close", sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END,
+                    scenario_col="scenario"),
             Measure(name="Open",  sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_START),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_START,
+                    scenario_col="scenario"),
             Measure(name="Flow",  sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.SUM),
+                    value_col="amount", date_col="date", agg_type=AggType.SUM,
+                    scenario_col="scenario"),
             Measure(name="NetChange",
                     dependencies=["Close", "Open"],
                     formula=lambda v: v["Close"] - v["Open"]),
@@ -273,7 +280,8 @@ class TestCumulativeWithComposition:
         r.register_many([
             Measure(name="Assets",
                     sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END,
+                    scenario_col="scenario"),
             Measure(name="NorthAssets",
                     sql="SELECT * FROM measure.Assets WHERE entity = 'North'"),
         ])
@@ -286,7 +294,8 @@ class TestCumulativeWithComposition:
         r.register_many([
             Measure(name="Assets",
                     sql="SELECT * FROM gl WHERE account_id = '1000'",
-                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END),
+                    value_col="amount", date_col="date", agg_type=AggType.CUMULATIVE_END,
+                    scenario_col="scenario"),
             Measure(name="NorthAssets",
                     sql="SELECT * FROM measure.Assets WHERE entity = 'North'"),
         ])

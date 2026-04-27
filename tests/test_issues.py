@@ -111,8 +111,8 @@ def test_measure_is_immutable():
 
 def test_two_measures_with_same_name_are_equal_despite_different_sql():
     """Name-based equality is intentional — the registry relies on it for deduplication."""
-    m1 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='4000'", value_col="amount")
-    m2 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='9999'", value_col="amount")
+    m1 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='4000'", value_col="amount", scenario_col="scenario")
+    m2 = Measure(name="Revenue", sql="SELECT * FROM gl WHERE account_id='9999'", value_col="amount", scenario_col="scenario")
 
     assert m1 == m2
     assert hash(m1) == hash(m2)
@@ -133,6 +133,7 @@ def test_table_parameter_raises_type_error(con):
         sql="SELECT * FROM gl WHERE account_id = '4000'",
         value_col="amount",
         date_col="date",
+        scenario_col="scenario",
     ))
     with pytest.raises(TypeError):
         Calculator(r, connection=con, table="does_not_exist")

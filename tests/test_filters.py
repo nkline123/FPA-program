@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for the IN-clause filter support — list/tuple filter values,
 CalculationContext normalisation, and interaction with all execution paths.
 """
@@ -59,6 +59,7 @@ def make_registry():
         name="Revenue",
         sql="SELECT * FROM gl WHERE account_id = '4000'",
         value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
     ))
     return r
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for scenario filtering.
 
 Two supported patterns:
@@ -57,6 +57,7 @@ class TestScenarioColumn:
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         tbl = calc.build_table(["Revenue"], [jan(calendar)], scenario="Actual")
@@ -68,6 +69,7 @@ class TestScenarioColumn:
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         actual = calc.build_table(["Revenue"], [jan(calendar)], scenario="Actual")
@@ -88,6 +90,7 @@ class TestMeasureScenarioField:
             name="ActualRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -101,6 +104,7 @@ class TestMeasureScenarioField:
             name="ActualRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -114,6 +118,7 @@ class TestMeasureScenarioField:
             name="BudgetRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Budget",
         ))
         calc = Calculator(r, connection=con)
@@ -127,12 +132,14 @@ class TestMeasureScenarioField:
             name="ActualRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Actual",
         ))
         r.register(Measure(
             name="BudgetRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Budget",
         ))
         calc = Calculator(r, connection=con)
@@ -149,6 +156,7 @@ class TestMeasureScenarioField:
             name="ActualRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -164,6 +172,7 @@ class TestMeasureScenarioField:
             name="ActualRevenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -177,6 +186,7 @@ class TestMeasureScenarioField:
             name="Revenue",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         tbl = calc.build_table(["Revenue"], [jan(calendar)], scenario="Actual")

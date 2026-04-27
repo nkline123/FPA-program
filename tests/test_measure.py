@@ -19,6 +19,15 @@ def test_leaf_sql_requires_value_col():
         )
 
 
+def test_leaf_sql_requires_scenario_col_or_scenario():
+    with pytest.raises(ValueError, match="scenario_col"):
+        Measure(
+            name="Rev",
+            sql="SELECT * FROM gl WHERE account_type = 'Income'",
+            value_col="amount",
+        )
+
+
 def test_composed_sql_does_not_require_value_col():
     # measure.X reference means composed — value_col is inherited, not required
     m = Measure(
@@ -55,6 +64,7 @@ def test_sql_and_resolver_is_valid():
         name="Rev",
         sql="SELECT * FROM gl",
         value_col="amount",
+        scenario_col="scenario",
         resolver=lambda ctx: 0.0,
     )
     assert m.sql
@@ -100,6 +110,7 @@ def test_custom_agg_type():
         name="HC",
         sql="SELECT * FROM hc",
         value_col="headcount",
+        scenario_col="scenario",
         agg_type=AggType.LAST_DAY,
     )
     assert m.agg_type == AggType.LAST_DAY
@@ -115,6 +126,7 @@ def test_custom_date_col():
         name="Rev",
         sql="SELECT * FROM gl",
         value_col="amount",
+        scenario_col="scenario",
         date_col="period_enddate",
     )
     assert m.date_col == "period_enddate"
@@ -151,13 +163,13 @@ def test_formula_called_with_dep_values():
 
 def test_hash_by_name():
     m1 = Measure(name="Rev", resolver=lambda ctx: 1)
-    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount", scenario_col="scenario")
     assert hash(m1) == hash(m2)
 
 
 def test_equality_by_name():
     m1 = Measure(name="Rev", resolver=lambda ctx: 1)
-    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount", scenario_col="scenario")
     assert m1 == m2
 
 
@@ -174,7 +186,7 @@ def test_not_equal_to_non_measure():
 
 def test_name_deduplication_in_set():
     m1 = Measure(name="Rev", resolver=lambda ctx: 0)
-    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount")
+    m2 = Measure(name="Rev", sql="SELECT * FROM gl", value_col="amount", scenario_col="scenario")
     assert len({m1, m2}) == 1
 
 

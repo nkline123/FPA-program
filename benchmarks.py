@@ -1,4 +1,4 @@
-"""
+﻿"""
 Baseline benchmarks for the FPA calculation engine.
 
 Run from the project root:
@@ -107,6 +107,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="COGS",
@@ -114,6 +115,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="OpEx",
@@ -121,6 +123,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="InterestExpense",
@@ -128,6 +131,7 @@ registry.register_many([
         value_col="amount",
         date_col="date",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="Gross Profit",

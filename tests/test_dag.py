@@ -22,6 +22,7 @@ def sql_leaf(name):
         name=name,
         sql=f"SELECT * FROM gl WHERE account_id = '{name}'",
         value_col="amount",
+        scenario_col="scenario",
     )
 
 

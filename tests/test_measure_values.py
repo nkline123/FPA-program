@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for MeasureValues and time-shifted measure resolution.
 
 MeasureValues is passed to every Measure formula.  Plain string keys return
@@ -226,6 +226,7 @@ class TestTimeShiftedFormulaDuckDB:
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         r.register(Measure(
             name="Revenue YoY %",
@@ -250,6 +251,7 @@ class TestTimeShiftedFormulaDuckDB:
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         r.register(Measure(
             name="YoY %",

@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 import pytest
 import duckdb
 from fpa import (
@@ -81,6 +81,7 @@ def make_registry():
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ),
         Measure(
             name="COGS",
@@ -88,6 +89,7 @@ def make_registry():
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ),
         Measure(
             name="Gross Profit",
@@ -203,6 +205,7 @@ class TestCalculatorPython:
             name="Rev",
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
+            scenario_col="scenario",
         ))
         calc = Calculator(r)  # no connection
         with pytest.raises(RuntimeError, match="no resolver"):
@@ -493,6 +496,7 @@ class TestCalculatorDuckDB:
             value_col="headcount",
             date_col="date",
             agg_type=AggType.LAST_DAY,
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 2, 29))
@@ -511,6 +515,7 @@ class TestCalculatorDuckDB:
             value_col="headcount",
             date_col="date",
             agg_type=AggType.LAST_DAY,
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
@@ -548,6 +553,7 @@ class TestCalculatorDuckDB:
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ))
         r.register(Measure(
             name="Adjustment",
@@ -587,12 +593,14 @@ class TestCalculatorDuckDB:
                 name="Revenue",
                 sql="SELECT * FROM gl WHERE account_id = '4000'",
                 value_col="amount", date_col="date",
+                scenario_col="scenario",
                 resolver=lambda ctx: 0.0,
             ),
             Measure(
                 name="COGS",
                 sql="SELECT * FROM gl WHERE account_id = '5000'",
                 value_col="amount", date_col="date",
+                scenario_col="scenario",
                 resolver=lambda ctx: 0.0,
             ),
             Measure(name="Gross Profit", dependencies=["Revenue", "COGS"],
@@ -721,6 +729,7 @@ class TestCalculatorDuckDB:
             sql="SELECT * FROM gl WHERE account_id = '4000'",
             value_col="amount",
             date_col="date",
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
@@ -740,6 +749,7 @@ class TestCalculatorDuckDB:
             sql="SELECT * FROM gl WHERE account_id = '4000';",  # trailing semicolon
             value_col="amount",
             date_col="date",
+            scenario_col="scenario",
         ))
         calc = Calculator(r, connection=con)
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))

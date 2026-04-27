@@ -7,6 +7,7 @@ def sql_measure(name, tags=None):
         name=name,
         sql=f"SELECT * FROM gl WHERE account_id = '{name}'",
         value_col="amount",
+        scenario_col="scenario",
         tags=tags or [],
     )
 

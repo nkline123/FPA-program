@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for SQL measure.X composition — CTE chaining, metadata inheritance,
 multi-level chains, and interaction with Python formula measures.
 """
@@ -65,6 +65,7 @@ def base_registry():
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
+            scenario_col="scenario",
         ),
         Measure(
             name="SalesExpense",
@@ -91,6 +92,7 @@ class TestCompositionCorrectness:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="SalesExpense",
@@ -100,6 +102,7 @@ class TestCompositionCorrectness:
                 name="SalesExpenseDirect",
                 sql="SELECT * FROM gl WHERE account_id = '6000' AND department = 'Sales'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
         ])
         calc = Calculator(r, connection=con)
@@ -185,6 +188,7 @@ class TestMetadataInheritance:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="txn_date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="SalesExpense",
@@ -202,11 +206,13 @@ class TestMetadataInheritance:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="AvgExpense",
                 sql="SELECT * FROM measure.Expense WHERE department = 'Sales'",
                 agg_type=AggType.AVERAGE,
+                scenario_col="scenario",
             ),
         ])
         calc = Calculator(r, connection=con)
@@ -220,6 +226,7 @@ class TestMetadataInheritance:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="NorthExpense",
@@ -249,6 +256,7 @@ class TestMultiLevelChain:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="NorthExpense",
@@ -272,6 +280,7 @@ class TestMultiLevelChain:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="NorthExpense",
@@ -293,6 +302,7 @@ class TestMultiLevelChain:
                 name="Expense",
                 sql="SELECT * FROM gl WHERE account_id = '6000'",
                 value_col="amount", date_col="date", agg_type=AggType.SUM,
+ scenario_col="scenario",
             ),
             Measure(
                 name="SalesExpense",

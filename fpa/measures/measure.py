@@ -148,16 +148,22 @@ class Measure:
             raise ValueError(
                 f"Measure '{self.name}' with formula must declare at least one dependency."
             )
-        # Leaf SQL measures (no measure.X refs) require value_col
-        if has_sql and not _sql_measure_refs(self.sql) and not self.value_col:
-            raise ValueError(
-                f"Measure '{self.name}' is a leaf SQL measure and requires value_col."
-            )
         if has_sql and self.agg_type == AggType.CALCULATED:
             raise ValueError(
                 f"Measure '{self.name}' is a SQL measure and cannot use AggType.CALCULATED. "
                 "Use SUM, AVERAGE, or LAST_DAY instead."
             )
+        # Leaf SQL measures (no measure.X refs) require value_col, and scenario_col or scenario
+        if has_sql and not _sql_measure_refs(self.sql):
+            if not self.value_col:
+                raise ValueError(
+                    f"Measure '{self.name}' is a leaf SQL measure and requires value_col."
+                )
+            if not self.scenario_col and self.scenario is None:
+                raise ValueError(
+                    f"Measure '{self.name}' is a leaf SQL measure and requires either "
+                    "scenario_col (the column to filter on) or scenario (a hardcoded value)."
+                )
 
     def __hash__(self):
         return hash(self.name)
