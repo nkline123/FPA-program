@@ -33,17 +33,18 @@ class Measure:
             scenario_col="scenario",   # defaults to Calculator.scenario_col if omitted
         )
 
-    **Scenario-locked measure** — set ``scenario`` to pin this measure to a
-    specific scenario regardless of what is passed to ``build_table``.
-    Useful for placing Actual and Budget measures in the same table call.
+    **Pre-scoped measure** — use ``scenario`` when the source data has no
+    scenario column.  The SQL itself filters the data to one scenario; set
+    ``scenario`` to label which scenario it represents.  The engine will not
+    inject a scenario WHERE clause, so ``scenario_col`` must be omitted.
 
         Measure(
             name="Actual Revenue",
-            sql="SELECT * FROM gl WHERE account_type = 'Income'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_type = 'Income'",
             value_col="amount",
             date_col="date",
             agg_type=AggType.SUM,
-            scenario="Actual",         # always filters WHERE scenario = 'Actual'
+            scenario="Actual",         # label only — no WHERE injected by the engine
         )
 
     **Composed SQL measure** — SQL references another measure via
@@ -95,10 +96,10 @@ class Measure:
         agg_type:     Aggregation type (SUM / AVERAGE / LAST_DAY /
                       CUMULATIVE_END / CUMULATIVE_START).  Inherited from
                       the nearest SQL ancestor when omitted.
-        scenario:     When set, the engine always filters this measure to
-                      this scenario value regardless of what is passed to
-                      ``build_table``.  Useful for placing Actual and
-                      Budget measures in the same table call.
+        scenario:     Label for pre-scoped measures whose SQL already filters
+                      to a single scenario.  When set, the engine skips the
+                      scenario WHERE clause entirely.  Cannot be combined
+                      with ``scenario_col``.
         dependencies: Measure names required by ``formula``.
         formula:      Callable(MeasureValues) → float.
         resolver:     Scalar Python fallback callable(CalculationContext)
@@ -162,7 +163,14 @@ class Measure:
             if not self.scenario_col and self.scenario is None:
                 raise ValueError(
                     f"Measure '{self.name}' is a leaf SQL measure and requires either "
-                    "scenario_col (the column to filter on) or scenario (a hardcoded value)."
+                    "scenario_col (the column to filter on) or scenario (a label when "
+                    "the data has no scenario column)."
+                )
+            if self.scenario_col and self.scenario is not None:
+                raise ValueError(
+                    f"Measure '{self.name}' cannot set both scenario_col and scenario. "
+                    "Use scenario_col when the data has a scenario column to filter on, "
+                    "or scenario when the data has no scenario column."
                 )
 
     def __hash__(self):

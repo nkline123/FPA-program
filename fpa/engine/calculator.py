@@ -421,13 +421,13 @@ class Calculator:
         where_parts = []
         params: List[Any] = []
 
-        # Measure-level scenario / scenario_col override the call-level values
+        # If scenario= is set on the measure, the SQL already scopes the data —
+        # no scenario WHERE clause needed. Otherwise filter by scenario_col.
         m = self._registry.get(measure_name)
-        effective_scenario     = m.scenario     if m.scenario     is not None else scenario
-        effective_scenario_col = m.scenario_col if m.scenario_col             else self._scenario_col
-
-        where_parts.append(f'"{effective_scenario_col}" = ?')
-        params.append(effective_scenario)
+        if m.scenario is None:
+            effective_scenario_col = m.scenario_col if m.scenario_col else self._scenario_col
+            where_parts.append(f'"{effective_scenario_col}" = ?')
+            params.append(scenario)
 
         for k, v in filters.items():
             fragment, vals = _filter_clause(k, v)

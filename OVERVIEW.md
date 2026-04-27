@@ -81,8 +81,8 @@ There is a single `Measure` class with three execution paths determined by
 which fields are set.
 
 **Leaf SQL measure** — reads directly from a source table.  You write the
-business-logic filter; the engine appends date range, scenario, and any extra
-dimension filters automatically.
+business-logic filter; the engine appends date range, scenario (when
+`scenario_col` is set), and any extra dimension filters automatically.
 
 ```python
 fpa.Measure(
@@ -91,6 +91,7 @@ fpa.Measure(
     value_col="amount",        # column to aggregate
     date_col="period_enddate", # column to filter by date range
     agg_type=fpa.AggType.SUM,
+    scenario_col="scenario",   # engine injects WHERE "scenario" = ?
 )
 ```
 
@@ -166,22 +167,35 @@ row with the latest `date_col` within the period — correct for stock measures
 
 ### Scenario Filtering
 
-The engine always injects `WHERE "scenario_col" = ?` into every SQL query
-using the scenario passed to `build_table` / `build_breakdown_table`.
+Two patterns, mutually exclusive — use one or the other per measure:
 
-**Measure-level scenario** — set `scenario="Actual"` directly on a `Measure`
-to lock it to a specific scenario regardless of what the caller passes:
+**`scenario_col`** — the data has a scenario column. The engine injects
+`WHERE "scenario_col" = ?` using the value passed to `build_table`:
+
+```python
+fpa.Measure(
+    name="Revenue",
+    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
+    scenario_col="scenario",   # engine injects WHERE "scenario" = ?
+)
+```
+
+**`scenario`** — the SQL already scopes the data to one scenario (pre-filtered
+view, table, or WHERE clause). Set `scenario=` as a label; the engine will not
+inject a scenario WHERE clause:
 
 ```python
 fpa.Measure(
     name="Actual Revenue",
-    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_type = 'Income'",
     value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
-    scenario="Actual",   # always filters to Actual; caller's scenario is ignored
+    scenario="Actual",   # label only — no WHERE injected
 )
 ```
 
-This lets Actual and Budget measures coexist in the same `build_table` call.
+This lets Actual and Budget measures coexist in the same `build_table` call
+regardless of which scenario is passed.
 
 **Custom scenario column** — set `scenario_col` on a `Measure` when the column
 is not named `"scenario"`:
@@ -214,7 +228,7 @@ List filter values are normalised to tuples for hashability and generate
 
 ```python
 calc.build_table(["Revenue"], periods, scenario="Actual", entity=["North", "South"])
-# → WHERE "scenario" = ? AND "entity" IN (?, ?)
+# → WHERE "scenario" = ? AND "entity" IN (?, ?)   (assuming Revenue uses scenario_col)
 ```
 
 ### Memoization
@@ -239,7 +253,7 @@ For each terminal SQL measure the engine:
 2. Builds a `WITH` clause — one CTE per ancestor in evaluation order
 3. Replaces `measure.<name>` references with quoted CTE identifiers
 4. Generates `FILTER (WHERE …)` aggregation columns — one per period
-5. Appends `WHERE`, `GROUP BY` for scenario, extra filters, and dimension
+5. Appends `WHERE` for scenario (when `scenario_col` is set), extra filters, and dimension; appends `GROUP BY` when a dimension is requested
 
 ```sql
 WITH "Expense" AS (

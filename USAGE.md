@@ -48,6 +48,7 @@ registry.register_many([
         value_col="amount",
         date_col="period_enddate",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="COGS",
@@ -55,6 +56,7 @@ registry.register_many([
         value_col="amount",
         date_col="period_enddate",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     fpa.Measure(
         name="Gross Profit",
@@ -159,8 +161,7 @@ fpa.Measure(
     value_col="amount",           # column to aggregate (required for leaf measures)
     date_col="period_enddate",    # column for date-range filtering
     agg_type=fpa.AggType.SUM,    # how value_col is aggregated per period
-    scenario_col="scenario",      # column holding the scenario label (default: "scenario")
-    scenario="Actual",            # lock this measure to a specific scenario (optional)
+    scenario_col="scenario",      # column holding the scenario label (defaults to Calculator.scenario_col)
     tags=["income_statement"],
     description="Total product revenue",
 )
@@ -168,9 +169,9 @@ fpa.Measure(
 
 **sql** is your business-logic filter. Use `SELECT *` so all dimension
 columns (entity, department, account_id, …) are available for GROUP BY. Do
-NOT include WHERE conditions for date range, scenario, or dimension values —
-those are appended by the engine automatically. Trailing semicolons are
-stripped automatically.
+NOT include WHERE conditions for date range or dimension values — those are
+appended by the engine automatically. Trailing semicolons are stripped
+automatically.
 
 **value_col** is the numeric column to aggregate. Required on leaf measures
 (those without `measure.<name>` references in their SQL).
@@ -194,14 +195,16 @@ beginning of history to the period boundary — use them for balance sheet
 accounts sourced from a GL transaction table. The invariant
 `CUMULATIVE_END - CUMULATIVE_START == SUM` holds for any period.
 
-**scenario** locks this measure to a specific scenario value. When set, the
-engine injects `WHERE "scenario_col" = 'Actual'` (or whichever value) for
-this measure regardless of what scenario is passed to `build_table`. Useful
-for putting Actual and Budget measures in the same table call.
-
 **scenario_col** names the column that holds the scenario label. Defaults to
 the Calculator's `scenario_col` argument (`"scenario"`). Set this when your
-table uses a different column name.
+table uses a different column name. The engine injects
+`WHERE "scenario_col" = ?` automatically using the value passed to
+`build_table`.
+
+**scenario** is used when the source data has no scenario column — typically
+because the SQL already filters to one scenario. Set it as a label so the
+engine knows what scenario this measure represents; it will not inject a
+scenario WHERE clause. Cannot be combined with `scenario_col`.
 
 ### Composed SQL measure — filtering on top of another measure
 
@@ -285,6 +288,7 @@ fpa.Measure(
     value_col="amount",
     date_col="date",
     agg_type=fpa.AggType.CUMULATIVE_END,   # closing balance at end of period
+    scenario_col="scenario",
 )
 
 fpa.Measure(
@@ -293,27 +297,33 @@ fpa.Measure(
     value_col="amount",
     date_col="date",
     agg_type=fpa.AggType.CUMULATIVE_START,  # opening balance at start of period
+    scenario_col="scenario",
 )
 ```
 
-### Scenario-locked measures
+### Pre-scoped measures (no scenario column)
+
+Use `scenario=` when your SQL already filters down to a single scenario —
+for example, when reading from a view or table that contains only one
+scenario's data. The engine will not inject a scenario WHERE clause; the
+`scenario=` field is just a label.
 
 ```python
 fpa.Measure(
     name="Actual Revenue",
-    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_type = 'Income'",
     value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
-    scenario="Actual",   # always returns Actual, regardless of build_table scenario
+    scenario="Actual",   # label only — no WHERE injected by the engine
 )
 
 fpa.Measure(
     name="Budget Revenue",
-    sql="SELECT * FROM gl WHERE account_type = 'Income'",
+    sql="SELECT * FROM gl WHERE scenario = 'Budget' AND account_type = 'Income'",
     value_col="amount", date_col="date", agg_type=fpa.AggType.SUM,
     scenario="Budget",
 )
 
-# Both can be in the same build_table call
+# Both can coexist in the same build_table call regardless of call scenario
 calc.build_table(["Actual Revenue", "Budget Revenue"], months, scenario="Actual")
 ```
 
@@ -548,6 +558,7 @@ fpa.Measure(
     value_col="amount",
     date_col="period_enddate",
     agg_type=fpa.AggType.SUM,
+    scenario_col="scenario",
     resolver=query_revenue,   # used when no DuckDB connection
 )
 ```

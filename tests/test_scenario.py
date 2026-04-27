@@ -80,45 +80,46 @@ class TestScenarioColumn:
 
 # ---------------------------------------------------------------------------
 # Measure-level scenario field
+# Use scenario= when the source data has no scenario column — the SQL
+# pre-scopes the data and scenario= is just a label; no WHERE is injected.
 # ---------------------------------------------------------------------------
 
 class TestMeasureScenarioField:
-    def test_measure_scenario_filters_correctly(self, con, calendar):
-        """Measure with scenario= always returns that scenario's data."""
+    def test_measure_scenario_no_where_injected(self, con, calendar):
+        """Measure with scenario= does not inject a scenario WHERE clause."""
         r = MeasureRegistry()
         r.register(Measure(
             name="ActualRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
         tbl = calc.build_table(["ActualRevenue"], [jan(calendar)], scenario="Actual")
         assert tbl.loc["ActualRevenue", "Jan 2024"] == pytest.approx(1500.0)
 
-    def test_measure_scenario_overrides_call_scenario(self, con, calendar):
-        """Measure locked to Actual returns Actual even when call asks for Budget."""
+    def test_measure_scenario_call_scenario_irrelevant(self, con, calendar):
+        """Measure with scenario= returns the same data regardless of call scenario."""
         r = MeasureRegistry()
         r.register(Measure(
             name="ActualRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
-        tbl = calc.build_table(["ActualRevenue"], [jan(calendar)], scenario="Budget")
-        assert tbl.loc["ActualRevenue", "Jan 2024"] == pytest.approx(1500.0)
+        actual_call = calc.build_table(["ActualRevenue"], [jan(calendar)], scenario="Actual")
+        budget_call = calc.build_table(["ActualRevenue"], [jan(calendar)], scenario="Budget")
+        assert actual_call.loc["ActualRevenue", "Jan 2024"] == pytest.approx(1500.0)
+        assert budget_call.loc["ActualRevenue", "Jan 2024"] == pytest.approx(1500.0)
 
     def test_measure_scenario_budget(self, con, calendar):
-        """scenario='Budget' on Measure returns Budget values."""
+        """scenario='Budget' on a pre-filtered measure returns Budget values."""
         r = MeasureRegistry()
         r.register(Measure(
             name="BudgetRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Budget' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Budget",
         ))
         calc = Calculator(r, connection=con)
@@ -126,20 +127,18 @@ class TestMeasureScenarioField:
         assert tbl.loc["BudgetRevenue", "Jan 2024"] == pytest.approx(1700.0)
 
     def test_measure_scenarios_coexist(self, con, calendar):
-        """Actual and Budget measures can coexist in the same build_table call."""
+        """Actual and Budget measures with scenario= can coexist in one build_table call."""
         r = MeasureRegistry()
         r.register(Measure(
             name="ActualRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Actual",
         ))
         r.register(Measure(
             name="BudgetRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Budget' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Budget",
         ))
         calc = Calculator(r, connection=con)
@@ -150,13 +149,12 @@ class TestMeasureScenarioField:
         assert tbl.loc["BudgetRevenue", "Jan 2024"] == pytest.approx(1700.0)
 
     def test_measure_scenario_with_entity_filter(self, con, calendar):
-        """Measure-level scenario and call-level entity filter are ANDed."""
+        """Call-level filters are still applied alongside scenario= measures."""
         r = MeasureRegistry()
         r.register(Measure(
             name="ActualRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -166,13 +164,12 @@ class TestMeasureScenarioField:
         assert tbl.loc["ActualRevenue", "Jan 2024"] == pytest.approx(1000.0)
 
     def test_measure_scenario_resolve(self, con, calendar):
-        """resolve() respects measure-level scenario."""
+        """resolve() works correctly for a measure with scenario=."""
         r = MeasureRegistry()
         r.register(Measure(
             name="ActualRevenue",
-            sql="SELECT * FROM gl WHERE account_id = '4000'",
+            sql="SELECT * FROM gl WHERE scenario = 'Actual' AND account_id = '4000'",
             value_col="amount", date_col="date", agg_type=AggType.SUM,
-            scenario_col="scenario",
             scenario="Actual",
         ))
         calc = Calculator(r, connection=con)
@@ -180,7 +177,7 @@ class TestMeasureScenarioField:
         assert calc.resolve("ActualRevenue", ctx) == pytest.approx(1500.0)
 
     def test_measure_no_scenario_uses_call_scenario(self, con, calendar):
-        """Measure without scenario= still respects the call-level scenario."""
+        """Measure with scenario_col= respects the call-level scenario."""
         r = MeasureRegistry()
         r.register(Measure(
             name="Revenue",
@@ -191,3 +188,14 @@ class TestMeasureScenarioField:
         calc = Calculator(r, connection=con)
         tbl = calc.build_table(["Revenue"], [jan(calendar)], scenario="Actual")
         assert tbl.loc["Revenue", "Jan 2024"] == pytest.approx(1500.0)
+
+    def test_cannot_set_both_scenario_col_and_scenario(self):
+        """Setting both scenario_col and scenario raises a ValueError."""
+        with pytest.raises(ValueError, match="cannot set both"):
+            Measure(
+                name="Bad",
+                sql="SELECT * FROM gl",
+                value_col="amount", date_col="date", agg_type=AggType.SUM,
+                scenario_col="scenario",
+                scenario="Actual",
+            )

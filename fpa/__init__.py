@@ -20,17 +20,18 @@ supports SQL composition via ``measure.<name>`` references.
             value_col="amount",
             date_col="date",
             agg_type=fpa.AggType.SUM,
+            scenario_col="scenario",
         ),
         fpa.Measure(
             name="Sales & Marketing",
             sql="SELECT * FROM measure.Expense WHERE department IN ('Sales', 'Marketing')",
-            # value_col / date_col / agg_type inherited from Expense
+            # value_col / date_col / agg_type / scenario_col inherited from Expense
         ),
         fpa.Measure(
-            name="Gross Margin %",
-            dependencies=["Gross Profit", "Revenue"],
-            formula=lambda v: (v["Gross Profit"] / v["Revenue"] * 100)
-                              if v["Revenue"] else 0.0,
+            name="S&M %",
+            dependencies=["Sales & Marketing", "Expense"],
+            formula=lambda v: (v["Sales & Marketing"] / v["Expense"] * 100)
+                              if v["Expense"] else 0.0,
         ),
     ])
 
@@ -38,13 +39,13 @@ supports SQL composition via ``measure.<name>`` references.
     periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)
 
     table = calc.build_table(
-        ["Expense", "Sales & Marketing", "Gross Margin %"],
+        ["Expense", "Sales & Marketing", "S&M %"],
         periods,
         scenario="Actual",
     )
 
     by_dept = calc.build_breakdown_table(
-        "Gross Margin %",
+        "Sales & Marketing",
         periods,
         scenario="Actual",
         dimension="department",

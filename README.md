@@ -6,8 +6,10 @@ periods and scenarios.
 Measures are defined as SQL queries or Python formulas. SQL measures compose
 on top of each other via `measure.<name>` references — the engine builds a
 CTE chain so parent measures are available without re-scanning source tables.
-The engine injects date, scenario, and dimension filters automatically and
-executes one CTE-chained query per SQL measure covering all periods at once.
+The engine injects date and dimension filters automatically and executes one
+CTE-chained query per SQL measure covering all periods at once. Scenario
+filtering is applied via `scenario_col` (engine injects the WHERE clause) or
+handled in the SQL itself when `scenario=` is set.
 
 ## Documentation
 
@@ -51,14 +53,23 @@ registry.register_many([
         value_col="amount",
         date_col="period_enddate",
         agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
+    ),
+    fpa.Measure(
+        name="COGS",
+        sql="SELECT * FROM general_ledger WHERE account_type = 'COGS'",
+        value_col="amount",
+        date_col="period_enddate",
+        agg_type=fpa.AggType.SUM,
+        scenario_col="scenario",
     ),
     # Composed SQL measure — filters on top of Revenue without re-scanning gl
     fpa.Measure(
         name="North Revenue",
         sql="SELECT * FROM measure.Revenue WHERE entity = 'North'",
-        # value_col / date_col / agg_type inherited from Revenue
+        # value_col / date_col / agg_type / scenario_col inherited from Revenue
     ),
-    # Python formula measure — calculated from resolved values
+    # Python formula measures — calculated from resolved values
     fpa.Measure(
         name="Gross Profit",
         dependencies=["Revenue", "COGS"],

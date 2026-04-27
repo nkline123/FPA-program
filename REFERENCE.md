@@ -126,13 +126,17 @@ fpa.Measure(
     # --- SQL path (leaf or composed) ---
     sql="SELECT * FROM gl WHERE ...",       # leaf: reference real tables
                                             # composed: use measure.<name> to reference another measure
-                                            # Do NOT include date/scenario/dimension WHERE clauses
+                                            # Do NOT include date or dimension WHERE clauses — engine appends those
+                                            # For scenario_col measures, do NOT include a scenario WHERE — engine appends it
+                                            # For scenario= measures, DO include the scenario filter in the SQL itself
                                             # Trailing semicolons stripped automatically
     value_col="amount",                     # column to aggregate (required on leaf measures)
     date_col="period_enddate",              # date column (default: Calculator.date_col)
     agg_type=fpa.AggType.SUM,              # aggregation type (inherited by composed measures)
     scenario_col="scenario",                # scenario column name (default: Calculator.scenario_col)
-    scenario="Actual",                      # lock to specific scenario — overrides build_table scenario
+                                            # engine injects WHERE scenario_col = ? automatically
+    scenario="Actual",                      # label for pre-scoped data with no scenario column
+                                            # engine skips scenario WHERE; cannot combine with scenario_col
 
     # --- Python formula path ---
     dependencies=["Revenue", "COGS"],       # List[str] — at least one required with formula
@@ -153,10 +157,11 @@ fpa.Measure(
 - `sql` and `formula` are mutually exclusive
 - `formula` and `resolver` are mutually exclusive
 - `value_col` is required on leaf SQL measures (no `measure.<name>` refs in sql)
+- Leaf SQL measures require either `scenario_col` or `scenario` (but not both)
 - `formula` requires at least one `dependencies` entry
 - `AggType.CALCULATED` is not valid on SQL measures
 - Composed measures inherit `value_col`, `date_col`, `agg_type`, `scenario_col` from nearest SQL ancestor
-- `scenario` on a Measure overrides the scenario passed to `build_table` for that measure
+- `scenario` labels pre-scoped data (SQL already filters to one scenario); engine skips scenario WHERE for that measure. Cannot be combined with `scenario_col`
 - `measure.<name>` SQL references require names with only word characters (`[a-zA-Z0-9_]`); names with spaces/special characters work as formula `dependencies` only
 
 ---
@@ -318,7 +323,7 @@ arg_max(employee_count, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024
 1. `value_col` is required on leaf SQL measures; inherited on composed measures
 2. `date_col` on Measure overrides Calculator's `date_col` for that measure
 3. `scenario_col` on Measure overrides Calculator's `scenario_col` for that measure
-4. `scenario` on Measure overrides the call-level scenario for that measure
+4. `scenario` on Measure labels pre-scoped data — engine skips scenario WHERE for that measure; cannot combine with `scenario_col`
 5. Composed measures inherit metadata from nearest SQL ancestor; override only when genuinely different
 6. `dimension_values=None` on DuckDB path → GROUP BY returns all groups (no IN clause)
 7. `dimension_values=None` on Python path → raises `ValueError`
@@ -373,7 +378,8 @@ smoke_test.py                     # end-to-end example with DuckDB
 | Using `measure.<name>` but forgetting to register the referenced measure | Register all ancestors before constructing `Calculator` |
 | Omitting both `sql`, `formula`, and `resolver` | Provide at least one |
 | Omitting `dimension_values` on Python path | Provide explicit values or use a DuckDB connection |
-| Including date/scenario WHERE in `sql` | Don't — the engine appends those automatically |
+| Including date or dimension WHERE in `sql` | Don't — the engine appends those automatically |
+| Including scenario WHERE in `sql` when using `scenario_col` | Don't — the engine appends it. Use `scenario=` (without `scenario_col`) if the SQL pre-filters to one scenario |
 | Wrong `date_col` value | Every cell silently returns 0 — the `FILTER` clause matches no rows |
 | Using `CUMULATIVE_END` for flow measures (Revenue, Expenses) | Use `SUM` for flows; `CUMULATIVE_END` accumulates all history to period end |
 | Expecting `LAST_DAY` to accumulate history | It returns the value from the latest date **within the period**, not all-time |
