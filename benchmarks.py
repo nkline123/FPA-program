@@ -211,13 +211,13 @@ bench("explicit dimension_values",
       lambda: fpa.Calculator(registry, connection=counter, calendar=calendar)
               .build_breakdown_table(
                   "Revenue", fy2024, scenario="Actual",
-                  dimension="entity", dimension_values=ENTITIES))
+                  dimensions="entity", dimension_values=ENTITIES))
 
 bench("no dimension_values (DuckDB enumerates)",
       lambda: fpa.Calculator(registry, connection=counter, calendar=calendar)
               .build_breakdown_table(
                   "Revenue", fy2024, scenario="Actual",
-                  dimension="entity"))
+                  dimensions="entity"))
 
 # -- 4. build_breakdown_table: derived measure (Gross Margin %) ------------------
 print("\n[4] build_breakdown_table — Gross Margin % × entity (derived, 12 months)")
@@ -225,7 +225,7 @@ bench("Gross Margin % by entity",
       lambda: fpa.Calculator(registry, connection=counter, calendar=calendar)
               .build_breakdown_table(
                   "Gross Margin %", fy2024, scenario="Actual",
-                  dimension="entity"))
+                  dimensions="entity"))
 
 # -- 5. Time-shifted YoY: Revenue YoY % across FY2025 ---------------------------
 print("\n[5] build_table — Revenue YoY % (time-shifted lookup, 12 months)")

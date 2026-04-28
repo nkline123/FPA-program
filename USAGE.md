@@ -393,33 +393,96 @@ table = calc.build_table(
 # table.loc["Revenue", "Jan 2024"]  → float
 ```
 
-### build_breakdown_table — dimension values × periods
+### build_breakdown_table — dimension value(s) × periods
 
-Returns a `pd.DataFrame` with dimension values as rows and period labels as
-columns.
+Returns a `pd.DataFrame` with dimension value(s) as rows and period labels as
+columns.  The `dimensions` argument accepts a single column name (string) or a
+list of column names for multi-dimension grouping.
+
+#### Single dimension
 
 ```python
-# With explicit dimension_values — results filtered and reindexed to those values
+# Without dimension_values — DuckDB enumerates every group found in the data.
+# Safe for high-cardinality dimensions (100K+ distinct values, same one query).
 breakdown = calc.build_breakdown_table(
     measure_name="Gross Profit",
     periods=months,
     scenario="Actual",
-    dimension="department",
+    dimensions="department",
+)
+# breakdown.loc["Engineering", "Jan 2024"]  → float
+
+# With explicit dimension_values — output is restricted and reindexed to those
+# values, in the order supplied.  Combinations absent from the data return 0.0.
+breakdown = calc.build_breakdown_table(
+    measure_name="Gross Profit",
+    periods=months,
+    scenario="Actual",
+    dimensions="department",
     dimension_values=["Engineering", "Sales", "Marketing"],
 )
+# breakdown.loc["Engineering", "Jan 2024"]  → float
+# Missing dimension values return 0.0 (no KeyError)
+```
 
-# Without dimension_values — returns every group DuckDB finds
-# Safe for high-cardinality dimensions (100K+ distinct values)
+#### Multiple dimensions
+
+Pass a list of column names to `dimensions`.  The result has a pandas
+`MultiIndex` on the rows, with one level per dimension.
+
+```python
+# Without dimension_values — DuckDB returns every (entity, department) pair.
 breakdown = calc.build_breakdown_table(
-    measure_name="Gross Profit",
+    measure_name="Expense",
     periods=months,
     scenario="Actual",
-    dimension="customer_id",
+    dimensions=["entity", "department"],
 )
+# breakdown.index is a MultiIndex with names ["entity", "department"]
+# breakdown.loc[("North", "Sales"), "Jan 2024"]  → float
 
-# breakdown.loc["Engineering", "Jan 2024"]  → float
-# Missing dimension values return 0.0
+# With explicit dimension_values — list of tuples, one per row.
+# Absent combinations return 0.0.
+breakdown = calc.build_breakdown_table(
+    measure_name="Expense",
+    periods=months,
+    scenario="Actual",
+    dimensions=["entity", "department"],
+    dimension_values=[
+        ("North", "Sales"),
+        ("North", "Marketing"),
+        ("South", "Sales"),
+    ],
+)
+# breakdown.loc[("North", "Sales"), "Jan 2024"]  → float
 ```
+
+#### Fixed filters alongside a dimension breakdown
+
+Extra keyword arguments are applied as fixed `WHERE` filters before the GROUP
+BY — they narrow the data but do not become row labels.
+
+```python
+breakdown = calc.build_breakdown_table(
+    "Revenue", months, scenario="Actual",
+    dimensions="entity",
+    region="West",                  # WHERE "region" = ?
+    account_id=["4000", "4010"],    # WHERE "account_id" IN (?, ?)
+)
+```
+
+#### dimension_values: when to use it
+
+`dimension_values` serves two purposes:
+
+1. **Python path (resolver-only measures, no DuckDB connection):** required.
+   The library cannot enumerate dimension combinations without a database.
+   For multiple dimensions pass a list of tuples.
+
+2. **DuckDB path:** optional.  Omit it to get every group DuckDB finds
+   (efficient for high cardinality).  Supply it when you need a fixed set of
+   rows in a specific order, or to include combinations that may have no data
+   (they will appear as 0.0).
 
 ### Scenario comparison
 
@@ -466,10 +529,12 @@ ctx.filters               # tuple of sorted (key, value) pairs — use .get()
 
 For a CTE-chained query the engine builds a `WITH` clause walking up the
 `measure.<name>` reference graph, then selects `FILTER` aggregations per
-period from the terminal measure:
+period from the terminal measure.
+
+**build_table (no breakdown):**
 
 ```sql
--- build_breakdown_table("S&M Expense", months, scenario="Actual", dimension="entity")
+-- build_table(["S&M Expense"], months, scenario="Actual", entity="North")
 
 WITH "Expense" AS (
     SELECT * FROM general_ledger WHERE account_id IN ('6000','6010')
@@ -477,6 +542,22 @@ WITH "Expense" AS (
 "S&M Expense" AS (
     SELECT * FROM "Expense" WHERE department IN ('Sales', 'Marketing')
 )
+SELECT
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
+    COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
+    ...
+FROM "S&M Expense"
+WHERE "scenario" = ?
+  AND "entity" = ?
+```
+
+**build_breakdown_table — single dimension:**
+
+```sql
+-- build_breakdown_table("S&M Expense", months, scenario="Actual", dimensions="entity")
+
+WITH "Expense" AS ( ... ),
+"S&M Expense" AS ( ... )
 SELECT "entity",
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
     COALESCE(SUM(amount) FILTER (WHERE period_enddate BETWEEN '2024-02-01' AND '2024-02-29'), 0.0) AS "Feb 2024",
@@ -486,10 +567,55 @@ WHERE "scenario" = ?
 GROUP BY "entity"
 ```
 
-For `CUMULATIVE_END` the `FILTER` uses `<=` instead of `BETWEEN`:
+With `dimension_values=["North", "South"]` an additional `WHERE` clause is
+injected before the GROUP BY:
+
+```sql
+WHERE "scenario" = ?
+  AND "entity" IN (?, ?)
+GROUP BY "entity"
+```
+
+**build_breakdown_table — multiple dimensions:**
+
+```sql
+-- build_breakdown_table("Expense", months, scenario="Actual",
+--                        dimensions=["entity", "department"])
+
+WITH "Expense" AS ( ... )
+SELECT "entity", "department",
+    COALESCE(SUM(amount) FILTER (WHERE date BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
+    ...
+FROM "Expense"
+WHERE "scenario" = ?
+GROUP BY "entity", "department"
+```
+
+With `dimension_values=[("North", "Sales"), ("South", "Marketing")]` DuckDB's
+row-value IN syntax is used:
+
+```sql
+WHERE "scenario" = ?
+  AND ("entity", "department") IN ((?, ?), (?, ?))
+GROUP BY "entity", "department"
+```
+
+**CUMULATIVE_END** uses `<=` instead of `BETWEEN`:
 
 ```sql
 COALESCE(SUM(amount) FILTER (WHERE date <= '2024-01-31'), 0.0) AS "Jan 2024"
+```
+
+**CUMULATIVE_START** uses `<`:
+
+```sql
+COALESCE(SUM(amount) FILTER (WHERE date < '2024-01-01'), 0.0) AS "Jan 2024"
+```
+
+**LAST_DAY** uses `arg_max`:
+
+```sql
+COALESCE(arg_max(headcount, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024"
 ```
 
 Period start/end dates are embedded as ISO literals (they come from

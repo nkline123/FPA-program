@@ -173,7 +173,7 @@ print("\n--- FY2024 Revenue by Entity (explicit dimension_values) ---")
 entities = ["North", "South", "West"]
 rev_breakdown = calc.build_breakdown_table(
     "Revenue", fy2024_months, scenario="Actual",
-    dimension="entity", dimension_values=entities,
+    dimensions="entity", dimension_values=entities,
 )
 
 header = f"{'Entity':<10}" + "".join(f"{p.label:>12}" for p in fy2024_months)
@@ -188,7 +188,7 @@ print("\n--- FY2024 Q1 Gross Margin % by Entity (all groups, no dimension_values
 q1_periods = calendar.periods_for_fiscal_year(2024, fpa.Grain.MONTH)[:3]
 gm_breakdown = calc.build_breakdown_table(
     "Gross Margin %", q1_periods, scenario="Actual",
-    dimension="entity",
+    dimensions="entity",
     # dimension_values omitted — DuckDB returns every entity in the data
 )
 

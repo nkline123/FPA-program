@@ -194,7 +194,7 @@ for n_dims, n_periods in [
         calc.clear_cache()
         secs, _ = run(lambda c=calc, p=periods, cust=customers: c.build_breakdown_table(
             "Revenue", p, scenario="Actual",
-            dimension="customer_id", dimension_values=cust,
+            dimensions="customer_id", dimension_values=cust,
         ))
         total = n_dims * n_periods
         print(f"  {label:<20}  {n_dims:>8,}  {n_periods:>8}  {total:>10,}  {fmt(secs, total)}")
@@ -217,7 +217,7 @@ for n_dims in [1_000, 5_000, 10_000, 25_000]:
         calc.clear_cache()
         secs, _ = run(lambda c=calc, cust=customers: c.build_breakdown_table(
             "Revenue", periods_60, scenario="Actual",
-            dimension="customer_id", dimension_values=cust,
+            dimensions="customer_id", dimension_values=cust,
         ))
         total = n_dims * 60
         print(f"  {label:<20}  {n_dims:>8,}  {60:>8}  {total:>10,}  {fmt(secs, total)}")
@@ -265,7 +265,7 @@ for label, calc in [("Calculator", plain), ("DuckDBCalc", ddb)]:
     for scenario in SCENARIOS:
         calc.build_breakdown_table(
             "Revenue", periods_12, scenario=scenario,
-            dimension="customer_id", dimension_values=customers_5k,
+            dimensions="customer_id", dimension_values=customers_5k,
         )
     secs = time.perf_counter() - t
     total = len(SCENARIOS) * 5_000 * 12
@@ -295,7 +295,7 @@ for n_dims, n_periods in [(5_000, 12), (10_000, 12), (10_000, 24)]:
         calc.clear_cache()
         secs, _ = run(lambda c=calc, p=periods, cust=customers, tgt=target: c.build_breakdown_table(
             tgt, p, scenario="Actual",
-            dimension="customer_id", dimension_values=cust,
+            dimensions="customer_id", dimension_values=cust,
         ))
         total = n_dims * n_periods
         print(f"  {label:<20}  {len(deep_measures):>10}  {n_dims:>8,}  {n_periods:>8}  {total:>10,}  {fmt(secs, total)}")
@@ -339,7 +339,7 @@ for n_dims, n_periods in [
     ddb.clear_cache()
     secs, _ = run(lambda p=periods, cust=customers: ddb.build_breakdown_table(
         "Revenue", p, scenario="Actual",
-        dimension="customer_id", dimension_values=cust,
+        dimensions="customer_id", dimension_values=cust,
     ))
     total = n_dims * n_periods
     note = "slow" if secs > 10 else "ok"

@@ -44,11 +44,20 @@ supports SQL composition via ``measure.<name>`` references.
         scenario="Actual",
     )
 
+    # Single dimension — plain Index
     by_dept = calc.build_breakdown_table(
         "Sales & Marketing",
         periods,
         scenario="Actual",
-        dimension="department",
+        dimensions="department",
+    )
+
+    # Multiple dimensions — MultiIndex
+    by_dept_entity = calc.build_breakdown_table(
+        "Sales & Marketing",
+        periods,
+        scenario="Actual",
+        dimensions=["entity", "department"],
     )
 """
 

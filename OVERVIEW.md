@@ -253,7 +253,7 @@ For each terminal SQL measure the engine:
 2. Builds a `WITH` clause — one CTE per ancestor in evaluation order
 3. Replaces `measure.<name>` references with quoted CTE identifiers
 4. Generates `FILTER (WHERE …)` aggregation columns — one per period
-5. Appends `WHERE` for scenario (when `scenario_col` is set), extra filters, and dimension; appends `GROUP BY` when a dimension is requested
+5. Appends `WHERE` for scenario (when `scenario_col` is set), extra filters, and optional dimension pre-filtering; appends `GROUP BY` for all requested dimensions when a breakdown is requested
 
 ```sql
 WITH "Expense" AS (
@@ -269,6 +269,25 @@ FROM "S&M Expense"
 WHERE "scenario" = ?
 ```
 
+For dimension breakdowns, one or more dimension columns are prepended to the
+SELECT list and appended to the GROUP BY:
+
+```sql
+-- Single dimension
+SELECT "entity",
+    COALESCE(SUM(amount) FILTER (WHERE …), 0.0) AS "Jan 2024", ...
+FROM "S&M Expense"
+WHERE "scenario" = ?
+GROUP BY "entity"
+
+-- Multiple dimensions
+SELECT "entity", "department",
+    COALESCE(SUM(amount) FILTER (WHERE …), 0.0) AS "Jan 2024", ...
+FROM "S&M Expense"
+WHERE "scenario" = ?
+GROUP BY "entity", "department"
+```
+
 One query is executed per terminal SQL measure — measures that are only
 referenced via `measure.<name>` by another SQL measure are covered by that
 measure's CTE chain and not queried separately.
@@ -281,7 +300,8 @@ the returned DataFrame.
 When `dimension_values=None`, there is no `IN (?, …)` clause — DuckDB groups
 and returns all distinct values natively.  A dimension with 200K distinct
 values is handled in the same single-scan query as one with 10.  Pass
-`dimension_values` only when you want to restrict the output to a known subset.
+`dimension_values` only when you want to restrict the output to a known subset
+or control row order.
 
 ### Python path (fallback)
 
@@ -289,11 +309,20 @@ Active when no `connection` is provided, or when no measure in the dependency
 chain has a `sql` query.
 
 Requires `resolver` on every SQL-less measure.  Each resolver is called once
-per `(measure, period, dimension_value)` cell and its result is memoized.
+per `(measure, period, dimension combination)` cell and its result is memoized.
 Useful for unit testing without a database.
 
 `build_breakdown_table` on the Python path requires explicit `dimension_values`
-— the library cannot enumerate them without a database.
+— the library cannot enumerate dimension combinations without a database.
+For multiple dimensions, `dimension_values` must be a list of tuples:
+
+```python
+calc.build_breakdown_table(
+    "Expense", periods, scenario="Actual",
+    dimensions=["entity", "department"],
+    dimension_values=[("North", "Sales"), ("South", "Marketing")],
+)
+```
 
 ---
 
@@ -312,7 +341,7 @@ FiscalCalendar  ──► Period objects (hashable, grain-aware)
               ▼                                          ▼
   Measure.resolver(ctx) → float          CTE-chained query per terminal SQL measure
               │                          (WITH ancestors + FILTER per period
-              │                           + optional GROUP BY dimension)
+              │                           + optional GROUP BY dimensions)
               ▼                                          │
   Measure.formula({dep: float}) → float                 ▼
               │                          Vectorized pandas for formula measures

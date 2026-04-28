@@ -286,7 +286,7 @@ class TestCalculatorPython:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 3, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.shape == (2, 3)
 
@@ -294,7 +294,7 @@ class TestCalculatorPython:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert list(tbl.index) == ["North", "South"]
 
@@ -306,7 +306,7 @@ class TestCalculatorPython:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = Calculator(r).build_breakdown_table(
             "Rev", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == 300.0
         assert tbl.loc["South", "Jan 2024"] == 200.0
@@ -321,7 +321,7 @@ class TestCalculatorPython:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         Calculator(r).build_breakdown_table(
             "Rev", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
             dept="Engineering",
         )
         assert received[0] == ("North", "Engineering")
@@ -331,7 +331,7 @@ class TestCalculatorPython:
         with pytest.raises(ValueError, match="dimension_values is required"):
             calc.build_breakdown_table(
                 "Revenue", periods, scenario="Actual",
-                dimension="entity",
+                dimensions="entity",
                 # dimension_values omitted — not allowed on Python path
             )
 
@@ -383,7 +383,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(500.0)
@@ -392,7 +392,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "COGS", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(300.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(100.0)
@@ -401,7 +401,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Gross Profit", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(700.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(400.0)
@@ -410,7 +410,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Gross Margin %", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(700.0 / 1000.0 * 100)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(400.0 / 500.0 * 100)
@@ -419,7 +419,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 2, 29))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)
         assert tbl.loc["North", "Feb 2024"] == pytest.approx(800.0)
@@ -428,7 +428,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Budget",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1100.0)
 
@@ -436,7 +436,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 2, 29))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.shape == (2, 2)
 
@@ -444,7 +444,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert list(tbl.index) == ["North", "South"]
 
@@ -452,7 +452,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "East"],
+            dimensions="entity", dimension_values=["North", "East"],
         )
         assert tbl.loc["East", "Jan 2024"] == pytest.approx(0.0)
 
@@ -460,7 +460,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 3, 1), date(2024, 3, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Mar 2024"] == pytest.approx(0.0)
 
@@ -471,7 +471,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity",
+            dimensions="entity",
             # dimension_values omitted
         )
         assert set(tbl.index) == {"North", "South"}
@@ -480,7 +480,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity",
+            dimensions="entity",
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(500.0)
@@ -502,7 +502,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 2, 29))
         tbl = calc.build_breakdown_table(
             "Headcount", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(12.0)  # latest in Jan
         assert tbl.loc["North", "Feb 2024"] == pytest.approx(13.0)  # latest in Feb
@@ -521,7 +521,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Headcount", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(12.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(6.0)
@@ -534,7 +534,7 @@ class TestCalculatorDuckDB:
         q1  = calendar.quarter_period(date(2024, 1, 1))   # Jan–Mar
         tbl = calc.build_breakdown_table(
             "Revenue", [jan, q1], scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         # Jan monthly: North=1000, South=500
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)
@@ -568,7 +568,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Adjusted Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1050.0)  # 1000 + 50
 
@@ -581,7 +581,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Fixed", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(99.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(99.0)
@@ -613,7 +613,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(0.0)
 
@@ -652,11 +652,11 @@ class TestCalculatorDuckDB:
         for measure in ["Revenue", "COGS", "Gross Profit"]:
             py_tbl = python_calc.build_breakdown_table(
                 measure, periods, scenario="Actual",
-                dimension="entity", dimension_values=entities,
+                dimensions="entity", dimension_values=entities,
             )
             db_tbl = duckdb_calc.build_breakdown_table(
                 measure, periods, scenario="Actual",
-                dimension="entity", dimension_values=entities,
+                dimensions="entity", dimension_values=entities,
             )
             for entity in entities:
                 for period in periods:
@@ -676,7 +676,7 @@ class TestCalculatorDuckDB:
         with patch.object(calc, "_sql_fetch", wraps=calc._sql_fetch) as mock_fetch:
             calc.build_breakdown_table(
                 "Revenue", periods, scenario="Actual",
-                dimension="entity", dimension_values=["North", "South"],
+                dimensions="entity", dimension_values=["North", "South"],
             )
         # One call to _sql_fetch regardless of how many periods are requested
         assert mock_fetch.call_count == 1
@@ -687,7 +687,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         calc.clear_cache()
         assert len(calc._memo) == 0
@@ -702,7 +702,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="O'Brien Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(250.0)
 
@@ -714,7 +714,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["O'Hare"],
+            dimensions="entity", dimension_values=["O'Hare"],
         )
         assert tbl.loc["O'Hare", "Jan 2024"] == pytest.approx(750.0)
 
@@ -735,7 +735,7 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
             dept="O'Connor's Dept",
         )
         # Should not raise; the parameterized WHERE clause handles the quote
@@ -755,6 +755,6 @@ class TestCalculatorDuckDB:
         periods = calendar.month_range(date(2024, 1, 1), date(2024, 1, 31))
         tbl = calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)

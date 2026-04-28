@@ -96,7 +96,7 @@ for n_dims, n_periods in [(50, 1), (100, 1), (100, 3)]:
     t = time.perf_counter()
     calc.build_breakdown_table(
         "Revenue", periods, scenario="Actual",
-        dimension="customer_id", dimension_values=customers,
+        dimensions="customer_id", dimension_values=customers,
     )
     secs = time.perf_counter() - t
     total = n_dims * n_periods
@@ -150,7 +150,7 @@ for n_dims, n_periods in [(1_000, 12), (5_000, 12), (10_000, 12), (10_000, 24)]:
     t = time.perf_counter()
     calc.build_breakdown_table(
         "Revenue", periods, scenario="Actual",
-        dimension="customer_id", dimension_values=customers,
+        dimensions="customer_id", dimension_values=customers,
     )
     secs = time.perf_counter() - t
     total = n_dims * n_periods

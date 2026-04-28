@@ -165,30 +165,45 @@ class Calculator:
         measure_name: str,
         periods: List[Period],
         scenario: str,
-        dimension: str,
+        dimensions: str | List[str],
         dimension_values: Optional[List[Any]] = None,
         **filters: Any,
     ) -> pd.DataFrame:
         """
-        Resolve a single measure broken down by a dimension across periods.
+        Resolve a single measure broken down by one or more dimensions across periods.
 
-        Returns a DataFrame with dimension values as rows and period labels
-        as columns.
+        Args:
+            dimensions:       A single column name (str) or a list of column names
+                              to group by.  When multiple dimensions are given the
+                              result has a MultiIndex.
+            dimension_values: Optional list that restricts which rows appear.
+                              For a single dimension pass a list of scalars:
+                                  ["North", "South"]
+                              For multiple dimensions pass a list of tuples:
+                                  [("North", "Sales"), ("South", "Marketing")]
+                              When omitted the DuckDB path enumerates all groups
+                              automatically; the Python path requires this to be set.
 
-        DuckDB path: one CTE-chained query per SQL measure, GROUP BY dimension.
-        Python path: one resolver call per (dimension_value, period) cell;
+        Returns a DataFrame with dimension value(s) as the row index and period
+        labels as columns.  A single dimension produces a plain Index; multiple
+        dimensions produce a MultiIndex.
+
+        DuckDB path: one CTE-chained query per SQL measure, GROUP BY all dimensions.
+        Python path: one resolver call per (dimension combination, period) cell;
                      dimension_values is required.
         """
+        if isinstance(dimensions, str):
+            dimensions = [dimensions]
         self._ensure_dag_current()
         all_needed = self._measures_needed([measure_name])
         if self._con and self._any_sql(all_needed):
             return self._breakdown_duckdb(
                 measure_name, periods, scenario, all_needed,
-                dimension, dimension_values, **filters
+                dimensions, dimension_values, **filters
             )
         return self._breakdown_python(
             measure_name, periods, scenario,
-            dimension, dimension_values, **filters
+            dimensions, dimension_values, **filters
         )
 
     def clear_cache(self) -> None:
@@ -233,7 +248,7 @@ class Calculator:
         if self._con and measure.sql:
             query, params = self._build_cte_query(
                 measure.name, [context.period], context.scenario,
-                dimension=None, dimension_values=None,
+                dimensions=None, dimension_values=None,
                 filters=dict(context.filters),
             )
             result = self._con.execute(query, params).fetchone()[0]
@@ -254,7 +269,7 @@ class Calculator:
         measure_name: str,
         periods: List[Period],
         scenario: str,
-        dimension: str,
+        dimensions: List[str],
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> pd.DataFrame:
@@ -267,15 +282,21 @@ class Calculator:
         data = {}
         for value in dimension_values:
             row = {}
+            dim_filter = self._make_dim_filter(dimensions, value)
             for period in periods:
                 ctx = CalculationContext.make(
                     period=period,
                     scenario=scenario,
-                    **{dimension: value, **filters},
+                    **dim_filter,
+                    **filters,
                 )
                 row[period.label] = self._resolve_unchecked(measure_name, ctx)
             data[value] = row
-        return pd.DataFrame(data).T
+
+        df = pd.DataFrame(data).T
+        if len(dimensions) > 1:
+            df.index = pd.MultiIndex.from_tuples(df.index, names=dimensions)
+        return df
 
     # ------------------------------------------------------------------
     # DuckDB resolution path
@@ -293,7 +314,7 @@ class Calculator:
 
         raw = self._sql_fetch(
             sql_names, periods, scenario,
-            dimension=None, dimension_values=None, **filters
+            dimensions=None, dimension_values=None, **filters
         )
         self._fill_resolver_columns(raw, all_needed, periods, scenario, None, None, **filters)
         raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters)
@@ -314,7 +335,7 @@ class Calculator:
         periods: List[Period],
         scenario: str,
         all_needed: List[str],
-        dimension: str,
+        dimensions: List[str],
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> pd.DataFrame:
@@ -322,20 +343,27 @@ class Calculator:
 
         raw = self._sql_fetch(
             sql_names, periods, scenario,
-            dimension=dimension, dimension_values=dimension_values, **filters
+            dimensions=dimensions, dimension_values=dimension_values, **filters
         )
-        self._fill_resolver_columns(raw, all_needed, periods, scenario, dimension, dimension_values, **filters)
-        raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters, dimension)
+        self._fill_resolver_columns(
+            raw, all_needed, periods, scenario, dimensions, dimension_values, **filters
+        )
+        raw = self._add_derived_columns(raw, all_needed, periods, scenario, filters, dimensions)
 
         target_cols = [_col_key(period, measure_name) for period in periods]
         result = raw[target_cols].copy()
         result.columns = [period.label for period in periods]
 
         if dimension_values is not None:
-            result = result.reindex([str(v) for v in dimension_values]).fillna(0.0)
-            result.index = dimension_values
+            if len(dimensions) == 1:
+                result = result.reindex(dimension_values).fillna(0.0)
+            else:
+                idx = pd.MultiIndex.from_tuples(dimension_values, names=dimensions)
+                result = result.reindex(idx).fillna(0.0)
         else:
-            result.index.name = None
+            if len(dimensions) == 1:
+                result.index.name = None
+            # MultiIndex already carries names from set_index
 
         return result
 
@@ -344,7 +372,7 @@ class Calculator:
         sql_measure_names: List[str],
         periods: List[Period],
         scenario: str,
-        dimension: Optional[str],
+        dimensions: Optional[List[str]],
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> pd.DataFrame:
@@ -355,8 +383,8 @@ class Calculator:
         terminal measure with FILTER (WHERE date BETWEEN ...) per period.
 
         Columns are named "{period.label}|{measure_name}".
-        With a dimension:   indexed by dimension value (string).
-        Without dimension:  single-row DataFrame.
+        With dimensions:    indexed by dimension value(s); MultiIndex when >1 dimension.
+        Without dimensions: single-row DataFrame.
         """
         if not sql_measure_names:
             return pd.DataFrame()
@@ -366,14 +394,16 @@ class Calculator:
         for name in sql_measure_names:
             query, params = self._build_cte_query(
                 name, periods, scenario,
-                dimension=dimension, dimension_values=dimension_values,
+                dimensions=dimensions, dimension_values=dimension_values,
                 filters=filters,
             )
             df = self._con.execute(query, params).df()
 
-            if dimension:
-                df = df.set_index(dimension)
-                df.index = df.index.astype(str)
+            if dimensions:
+                if len(dimensions) == 1:
+                    df = df.set_index(dimensions[0])
+                else:
+                    df = df.set_index(dimensions)
 
             df.columns = [f"{col}|{name}" for col in df.columns]
             frames.append(df)
@@ -385,7 +415,7 @@ class Calculator:
         measure_name: str,
         periods: List[Period],
         scenario: str,
-        dimension: Optional[str],
+        dimensions: Optional[List[str]],
         dimension_values: Optional[List[Any]],
         filters: dict,
     ) -> Tuple[str, List[Any]]:
@@ -409,13 +439,13 @@ class Calculator:
 
         with_clause = "WITH " + ",\n".join(cte_parts)
 
-        # SELECT: period aggregations + optional dimension column
+        # SELECT: period aggregations + optional dimension columns
         select_parts = [
             f'{self._agg_expr(agg_type, value_col, date_col, p)} AS "{p.label}"'
             for p in periods
         ]
-        if dimension:
-            select_parts = [f'"{dimension}"'] + select_parts
+        if dimensions:
+            select_parts = [f'"{d}"' for d in dimensions] + select_parts
 
         # WHERE: scenario (optional) + fixed filters + optional dimension IN
         where_parts = []
@@ -434,10 +464,19 @@ class Calculator:
             where_parts.append(fragment)
             params.extend(vals)
 
-        if dimension and dimension_values is not None:
-            placeholders = ", ".join("?" * len(dimension_values))
-            where_parts.append(f'"{dimension}" IN ({placeholders})')
-            params.extend(dimension_values)
+        if dimensions and dimension_values is not None:
+            if len(dimensions) == 1:
+                placeholders = ", ".join("?" * len(dimension_values))
+                where_parts.append(f'"{dimensions[0]}" IN ({placeholders})')
+                params.extend(dimension_values)
+            else:
+                dim_cols = ", ".join(f'"{d}"' for d in dimensions)
+                row_placeholders = ", ".join(
+                    f"({', '.join('?' * len(dimensions))})" for _ in dimension_values
+                )
+                where_parts.append(f'({dim_cols}) IN ({row_placeholders})')
+                for vals in dimension_values:
+                    params.extend(vals)
 
         select_clause = ", ".join(select_parts)
 
@@ -448,8 +487,9 @@ class Calculator:
         )
         if where_parts:
             query += f'\nWHERE {" AND ".join(where_parts)}'
-        if dimension:
-            query += f'\nGROUP BY "{dimension}"'
+        if dimensions:
+            group_cols = ", ".join(f'"{d}"' for d in dimensions)
+            query += f'\nGROUP BY {group_cols}'
 
         return query, params
 
@@ -460,7 +500,9 @@ class Calculator:
         """
         all_deps = self._dag.all_dependencies_of(measure_name)
         sql_ancestors = [n for n in all_deps if bool(self._registry.get(n).sql)]
-        return sql_ancestors + [measure_name]
+        if bool(self._registry.get(measure_name).sql):
+            return sql_ancestors + [measure_name]
+        return sql_ancestors
 
     def _resolve_metadata(self, measure_name: str) -> Tuple[str, str, AggType]:
         """
@@ -555,7 +597,7 @@ class Calculator:
         all_needed: List[str],
         periods: List[Period],
         scenario: str,
-        dimension: Optional[str],
+        dimensions: Optional[List[str]],
         dimension_values: Optional[List[Any]],
         **filters: Any,
     ) -> None:
@@ -575,25 +617,43 @@ class Calculator:
                 if col in df.columns:
                     continue
 
-                if dimension and dimension_values is not None:
-                    values_map = {
-                        str(dv): self._resolve_unchecked(
-                            name,
-                            CalculationContext.make(
-                                period=period, scenario=scenario,
-                                **{dimension: dv, **filters}
-                            ),
-                        )
-                        for dv in dimension_values
-                    }
+                if dimensions and dimension_values is not None:
+                    # Build lookup keyed to match the DataFrame index type.
+                    # Single-dim: index is string → key with str(dv).
+                    # Multi-dim:  index is MultiIndex tuples → key with dv directly.
+                    if len(dimensions) == 1:
+                        values_map = {
+                            dv: self._resolve_unchecked(
+                                name,
+                                CalculationContext.make(
+                                    period=period, scenario=scenario,
+                                    **{dimensions[0]: dv},
+                                    **filters,
+                                ),
+                            )
+                            for dv in dimension_values
+                        }
+                    else:
+                        values_map = {
+                            dv: self._resolve_unchecked(
+                                name,
+                                CalculationContext.make(
+                                    period=period, scenario=scenario,
+                                    **dict(zip(dimensions, dv)),
+                                    **filters,
+                                ),
+                            )
+                            for dv in dimension_values
+                        }
                     df[col] = df.index.map(values_map).astype(float)
-                elif dimension:
+                elif dimensions:
                     df[col] = [
                         self._resolve_unchecked(
                             name,
                             CalculationContext.make(
                                 period=period, scenario=scenario,
-                                **{dimension: dv, **filters}
+                                **self._make_dim_filter(dimensions, dv),
+                                **filters,
                             ),
                         )
                         for dv in df.index
@@ -609,7 +669,7 @@ class Calculator:
         periods: List[Period],
         scenario: str,
         filters: Optional[dict] = None,
-        dimension: Optional[str] = None,
+        dimensions: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """
         Compute Python formula measures in DAG order and append to the DataFrame.
@@ -634,13 +694,17 @@ class Calculator:
                 try:
                     new_cols[col] = m.formula(dep_series)
                 except (ValueError, TypeError, KeyError, AttributeError):
-                    # AttributeError: truthiness check on a Series raises in some
-                    # pandas versions; fall back to row-wise apply for conditionals
+                    # Vectorized path failed — fall back to row-wise apply with MeasureValues.
+                    # ValueError/TypeError: pandas raises these when a formula does `if series:`
+                    #   (truth value of a Series is ambiguous).
+                    # KeyError: time-shifted lookups like v["Revenue", -12] raise KeyError on a
+                    #   plain dict; MeasureValues.__getitem__ handles tuple keys.
+                    # AttributeError: some pandas versions raise this on Series truthiness checks.
                     combined = df.assign(
                         **{k: v for k, v in new_cols.items() if k not in df.columns}
                     )
                     new_cols[col] = combined.apply(
-                        self._make_row_applier(m, period, scenario, filters, dimension),
+                        self._make_row_applier(m, period, scenario, filters, dimensions),
                         axis=1,
                     )
 
@@ -656,11 +720,11 @@ class Calculator:
         period: Period,
         scenario: str,
         filters: Optional[dict],
-        dimension: Optional[str],
+        dimensions: Optional[List[str]],
     ):
         """Return a row → float callable for use with DataFrame.apply."""
         def _apply(row):
-            dim_filter = {dimension: row.name} if dimension else {}
+            dim_filter = self._make_dim_filter(dimensions, row.name) if dimensions else {}
             ctx = CalculationContext.make(
                 period=period,
                 scenario=scenario,
@@ -674,6 +738,16 @@ class Calculator:
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_dim_filter(dimensions: List[str], value: Any) -> dict:
+        """Build a {col: val} filter dict from a dimensions list and one row's index value.
+
+        For a single dimension value is a scalar; for multiple dimensions it is a tuple.
+        """
+        if len(dimensions) == 1:
+            return {dimensions[0]: value}
+        return dict(zip(dimensions, value))
 
     def _any_sql(self, all_needed: List[str]) -> bool:
         """Return True if any measure in the dependency chain has sql."""

@@ -154,7 +154,6 @@ class TestCompositionCorrectness:
             ["SalesExpense", "MarketingExpense"], periods,
             scenario="Actual", entity="North"
         )
-        assert tbl.loc["SalesExpense",     "Jan 2024"] == pytest.approx(300.0 + 200.0)  # wait, entity=North
         assert tbl.loc["SalesExpense",     "Jan 2024"] == pytest.approx(500.0)
         assert tbl.loc["MarketingExpense", "Jan 2024"] == pytest.approx(300.0)
 
@@ -330,7 +329,7 @@ class TestCompositionBreakdown:
         calc = Calculator(base_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "SalesExpense", [jan(calendar)], scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(500.0)
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(200.0)
@@ -339,7 +338,7 @@ class TestCompositionBreakdown:
         calc = Calculator(base_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "SalesExpense", [jan(calendar)], scenario="Actual",
-            dimension="entity",
+            dimensions="entity",
         )
         assert set(tbl.index) == {"North", "South"}
 
@@ -347,7 +346,7 @@ class TestCompositionBreakdown:
         calc = Calculator(base_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "SalesExpense", [jan(calendar)], scenario="Actual",
-            dimension="entity", dimension_values=["North", "East"],
+            dimensions="entity", dimension_values=["North", "East"],
         )
         assert tbl.loc["East", "Jan 2024"] == pytest.approx(0.0)
 
@@ -355,7 +354,7 @@ class TestCompositionBreakdown:
         calc = Calculator(base_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "SalesExpense", [jan(calendar), feb(calendar)], scenario="Actual",
-            dimension="entity", dimension_values=["North"],
+            dimensions="entity", dimension_values=["North"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(500.0)
         assert tbl.loc["North", "Feb 2024"] == pytest.approx(600.0)
@@ -403,7 +402,7 @@ class TestComposedWithFormula:
         calc = Calculator(r, connection=con)
         tbl = calc.build_breakdown_table(
             "SalesAndMarketing", [jan(calendar)], scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(800.0)   # 500+300
         assert tbl.loc["South", "Jan 2024"] == pytest.approx(300.0)   # 200+100
@@ -442,6 +441,106 @@ class TestSqlNamesToFetch:
         assert "Expense" not in fetch
         assert "SalesExpense" in fetch
         assert "MarketingExpense" in fetch
+
+
+# ---------------------------------------------------------------------------
+# Multi-dimension breakdown
+# ---------------------------------------------------------------------------
+
+class TestMultiDimensionBreakdown:
+    def test_two_dimensions_multiindex(self, con, calendar):
+        """Result has a MultiIndex when two dimensions are requested."""
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+        )
+        assert isinstance(tbl.index, __import__("pandas").MultiIndex)
+
+    def test_two_dimensions_index_names(self, con, calendar):
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+        )
+        assert list(tbl.index.names) == ["entity", "department"]
+
+    def test_two_dimensions_correct_values(self, con, calendar):
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+        )
+        assert tbl.loc[("North", "Sales"),     "Jan 2024"] == pytest.approx(500.0)
+        assert tbl.loc[("North", "Marketing"), "Jan 2024"] == pytest.approx(300.0)
+        assert tbl.loc[("South", "R&D"),       "Jan 2024"] == pytest.approx(150.0)
+
+    def test_two_dimensions_explicit_dimension_values(self, con, calendar):
+        """Explicit dimension_values list of tuples restricts and orders the rows."""
+        calc = Calculator(base_registry(), connection=con)
+        want = [("North", "Sales"), ("South", "Marketing")]
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+            dimension_values=want,
+        )
+        assert list(tbl.index) == want
+        assert tbl.loc[("North", "Sales"),     "Jan 2024"] == pytest.approx(500.0)
+        assert tbl.loc[("South", "Marketing"), "Jan 2024"] == pytest.approx(100.0)
+
+    def test_two_dimensions_missing_combo_returns_zero(self, con, calendar):
+        """A requested combination that has no data returns 0.0."""
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+            dimension_values=[("North", "Sales"), ("East", "Sales")],
+        )
+        assert tbl.loc[("East", "Sales"), "Jan 2024"] == pytest.approx(0.0)
+
+    def test_two_dimensions_multiple_periods(self, con, calendar):
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar), feb(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+            dimension_values=[("North", "Sales")],
+        )
+        assert tbl.loc[("North", "Sales"), "Jan 2024"] == pytest.approx(500.0)
+        assert tbl.loc[("North", "Sales"), "Feb 2024"] == pytest.approx(600.0)
+
+    def test_single_dim_as_list_still_works(self, con, calendar):
+        """Passing dimensions as a one-element list produces the same plain Index as a string."""
+        calc = Calculator(base_registry(), connection=con)
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity"],
+        )
+        assert not isinstance(tbl.index, __import__("pandas").MultiIndex)
+        assert tbl.loc["North", "Jan 2024"] == pytest.approx(1200.0)  # 500+300+400
+
+    def test_python_path_two_dimensions(self, calendar):
+        """Python path (resolver-only) works with multiple dimensions."""
+        lookup = {
+            ("North", "Sales"):     500.0,
+            ("North", "Marketing"): 300.0,
+            ("South", "Sales"):     200.0,
+        }
+        r = MeasureRegistry()
+        r.register(Measure(
+            name="Expense",
+            resolver=lambda ctx: lookup.get((ctx.get("entity"), ctx.get("department")), 0.0),
+        ))
+        calc = Calculator(r)
+        combos = [("North", "Sales"), ("North", "Marketing"), ("South", "Sales")]
+        tbl = calc.build_breakdown_table(
+            "Expense", [jan(calendar)], scenario="Actual",
+            dimensions=["entity", "department"],
+            dimension_values=combos,
+        )
+        assert isinstance(tbl.index, __import__("pandas").MultiIndex)
+        assert tbl.loc[("North", "Sales"),     "Jan 2024"] == pytest.approx(500.0)
+        assert tbl.loc[("North", "Marketing"), "Jan 2024"] == pytest.approx(300.0)
+        assert tbl.loc[("South", "Sales"),     "Jan 2024"] == pytest.approx(200.0)
 
 
 # ---------------------------------------------------------------------------

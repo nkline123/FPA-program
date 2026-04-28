@@ -97,7 +97,15 @@ by_entity = calc.build_breakdown_table(
     "Gross Profit",
     months,
     scenario="Actual",
-    dimension="entity",
+    dimensions="entity",
+)
+
+# Multi-dimension breakdown — GROUP BY entity AND department
+by_entity_dept = calc.build_breakdown_table(
+    "Gross Profit",
+    months,
+    scenario="Actual",
+    dimensions=["entity", "department"],  # returns a MultiIndex DataFrame
 )
 ```
 

@@ -214,7 +214,7 @@ class TestInFilterBreakdown:
         calc = Calculator(make_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "Revenue", [jan(calendar)], scenario="Actual",
-            dimension="entity",
+            dimensions="entity",
             region=["East"],
         )
         # Only East-region rows: North and South (and East entity)
@@ -224,7 +224,7 @@ class TestInFilterBreakdown:
         calc = Calculator(make_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "Revenue", [jan(calendar)], scenario="Actual",
-            dimension="entity", dimension_values=["North", "West"],
+            dimensions="entity", dimension_values=["North", "West"],
             region=["East", "West"],
         )
         assert tbl.loc["North", "Jan 2024"] == pytest.approx(1000.0)
@@ -234,7 +234,7 @@ class TestInFilterBreakdown:
         calc = Calculator(make_registry(), connection=con)
         tbl = calc.build_breakdown_table(
             "Revenue", [jan(calendar)], scenario="Actual",
-            dimension="entity",
+            dimensions="entity",
             entity=["North", "South"],
         )
         assert set(tbl.index) == {"North", "South"}

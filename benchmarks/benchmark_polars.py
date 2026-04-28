@@ -129,7 +129,7 @@ for n_dims in [1_000, 5_000, 10_000]:
         t = time.perf_counter()
         calc.build_breakdown_table(
             "Revenue", periods, scenario="Actual",
-            dimension="customer_id", dimension_values=customers,
+            dimensions="customer_id", dimension_values=customers,
         )
         secs = time.perf_counter() - t
         total = n_dims * n_periods

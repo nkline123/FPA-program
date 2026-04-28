@@ -243,21 +243,45 @@ df = calc.build_table(
 # df.loc["Revenue", "Jan 2024"]  → float
 ```
 
-### build_breakdown_table — dimension values × periods
+### build_breakdown_table — dimension value(s) × periods
 
 ```python
+# Single dimension — plain Index on rows
 df = calc.build_breakdown_table(
     measure_name="Gross Profit",
     periods=months,
     scenario="Actual",
-    dimension="department",
+    dimensions="department",             # str or List[str]
     dimension_values=["Eng", "Sales"],   # optional — omit to return all groups
     entity="North",                      # optional fixed filters
 )
-# df: pd.DataFrame, index=dimension_values (or all found groups), columns=period.label strings
+# df: pd.DataFrame, index=dimension values, columns=period.label strings
 # df.loc["Eng", "Jan 2024"]  → float
 # Missing dimension values → 0.0  (no KeyError)
+
+# Multiple dimensions — MultiIndex on rows
+df = calc.build_breakdown_table(
+    measure_name="Expense",
+    periods=months,
+    scenario="Actual",
+    dimensions=["entity", "department"],
+    dimension_values=[                   # list of tuples; omit for all groups
+        ("North", "Sales"),
+        ("South", "Marketing"),
+    ],
+)
+# df: pd.DataFrame with MultiIndex(names=["entity", "department"])
+# df.loc[("North", "Sales"), "Jan 2024"]  → float
+# Missing combinations → 0.0  (no KeyError)
 ```
+
+**dimension_values** serves two purposes:
+- **Python path** (resolver-only, no DuckDB connection): required. The library
+  cannot enumerate dimension combinations without a database. For multiple
+  dimensions, pass a list of tuples.
+- **DuckDB path**: optional. Omit to get every group DuckDB finds (efficient
+  even at high cardinality). Supply it to fix the row set, row order, or to
+  ensure zero-rows for absent combinations.
 
 ### Cache
 
@@ -272,7 +296,7 @@ calc.clear_cache()   # call after underlying data changes
 CTE chain per terminal SQL measure.  Period dates embedded as ISO literals;
 everything else parameterized.
 
-**SUM — build_breakdown_table:**
+**SUM — build_breakdown_table, single dimension:**
 ```sql
 WITH "Expense" AS (
     SELECT * FROM gl WHERE account_id IN ('6000','6010')
@@ -288,6 +312,29 @@ WHERE "scenario" = ?
 GROUP BY "department"
 ```
 
+With `dimension_values=["Sales", "Marketing"]` adds:
+```sql
+  AND "department" IN (?, ?)
+```
+
+**SUM — build_breakdown_table, multiple dimensions:**
+```sql
+SELECT "entity", "department",
+    COALESCE(SUM(amount) FILTER (WHERE date BETWEEN '2024-01-01' AND '2024-01-31'), 0.0) AS "Jan 2024",
+    ...
+FROM "Expense"
+WHERE "scenario" = ?
+GROUP BY "entity", "department"
+```
+
+With `dimension_values=[("North", "Sales"), ("South", "Mktg")]` uses DuckDB's
+row-value IN syntax:
+```sql
+  AND ("entity", "department") IN ((?, ?), (?, ?))
+```
+
+**build_table (no breakdown):** same structure without SELECT dimensions and GROUP BY.
+
 **CUMULATIVE_END:**
 ```sql
 COALESCE(SUM(amount) FILTER (WHERE date <= '2024-01-31'), 0.0) AS "Jan 2024"
@@ -302,8 +349,6 @@ COALESCE(SUM(amount) FILTER (WHERE date < '2024-01-01'), 0.0) AS "Jan 2024"
 ```sql
 arg_max(employee_count, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024-01-01' AND '2024-01-31') AS "Jan 2024"
 ```
-
-**build_table (no dimension):** same structure without SELECT dimension and GROUP BY.
 
 ---
 
@@ -325,12 +370,16 @@ arg_max(employee_count, snapshot_date) FILTER (WHERE snapshot_date BETWEEN '2024
 3. `scenario_col` on Measure overrides Calculator's `scenario_col` for that measure
 4. `scenario` on Measure labels pre-scoped data — engine skips scenario WHERE for that measure; cannot combine with `scenario_col`
 5. Composed measures inherit metadata from nearest SQL ancestor; override only when genuinely different
-6. `dimension_values=None` on DuckDB path → GROUP BY returns all groups (no IN clause)
-7. `dimension_values=None` on Python path → raises `ValueError`
-8. Period dates in SQL are ISO literals from FiscalCalendar, never user input
-9. All other WHERE values are parameterized (`?`) to prevent SQL injection
-10. Circular dependencies → `ValueError` at `Calculator()` construction
-11. Duplicate measure name → `ValueError` at `registry.register()`
+6. `dimensions` accepts a single string or a list of strings — a list of one string behaves identically to a plain string (plain Index, no MultiIndex)
+7. `dimensions` as a list of two or more strings → result has a pandas MultiIndex with one level per dimension, names set to the dimension column names
+8. `dimension_values=None` on DuckDB path → GROUP BY returns all groups (no IN clause); efficient at any cardinality
+9. `dimension_values` for a single dimension → list of scalars: `["North", "South"]`
+10. `dimension_values` for multiple dimensions → list of tuples, one per desired row: `[("North", "Sales"), ("South", "Mktg")]`
+11. `dimension_values=None` on Python path → raises `ValueError` (the library cannot enumerate combinations without a database)
+12. Period dates in SQL are ISO literals from FiscalCalendar, never user input
+13. All other WHERE values are parameterized (`?`) to prevent SQL injection
+14. Circular dependencies → `ValueError` at `Calculator()` construction
+15. Duplicate measure name → `ValueError` at `registry.register()`
 
 ---
 
@@ -378,6 +427,8 @@ smoke_test.py                     # end-to-end example with DuckDB
 | Using `measure.<name>` but forgetting to register the referenced measure | Register all ancestors before constructing `Calculator` |
 | Omitting both `sql`, `formula`, and `resolver` | Provide at least one |
 | Omitting `dimension_values` on Python path | Provide explicit values or use a DuckDB connection |
+| Passing scalars in `dimension_values` when `dimensions` is a list | Use tuples: `[("North", "Sales"), ...]` — one tuple per row |
+| Expecting a plain Index when `dimensions` is a multi-element list | A list of 2+ dimensions always returns a MultiIndex; use `.loc[("North", "Sales"), "Jan 2024"]` |
 | Including date or dimension WHERE in `sql` | Don't — the engine appends those automatically |
 | Including scenario WHERE in `sql` when using `scenario_col` | Don't — the engine appends it. Use `scenario=` (without `scenario_col`) if the SQL pre-filters to one scenario |
 | Wrong `date_col` value | Every cell silently returns 0 — the `FILTER` clause matches no rows |

@@ -151,7 +151,7 @@ class TestCumulativeEnd:
         feb = calendar.month_period(date(2024, 2, 1))
         tbl = calc.build_breakdown_table(
             "Assets", [feb], scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Feb 2024"] == pytest.approx(1300.0)  # 1000+300
         assert tbl.loc["South", "Feb 2024"] == pytest.approx(300.0)   # 500-200
@@ -203,7 +203,7 @@ class TestCumulativeStart:
         feb = calendar.month_period(date(2024, 2, 1))
         tbl = calc.build_breakdown_table(
             "Assets", [feb], scenario="Actual",
-            dimension="entity", dimension_values=["North", "South"],
+            dimensions="entity", dimension_values=["North", "South"],
         )
         assert tbl.loc["North", "Feb 2024"] == pytest.approx(1000.0)
         assert tbl.loc["South", "Feb 2024"] == pytest.approx(500.0)
@@ -261,9 +261,9 @@ class TestCumulativeInvariant:
         calc = Calculator(r, connection=con)
         feb = calendar.month_period(date(2024, 2, 1))
         net = calc.build_breakdown_table("NetChange", [feb], scenario="Actual",
-                                         dimension="entity", dimension_values=["North", "South"])
+                                         dimensions="entity", dimension_values=["North", "South"])
         flow = calc.build_breakdown_table("Flow", [feb], scenario="Actual",
-                                          dimension="entity", dimension_values=["North", "South"])
+                                          dimensions="entity", dimension_values=["North", "South"])
         for entity in ["North", "South"]:
             assert net.loc[entity, "Feb 2024"] == pytest.approx(
                 flow.loc[entity, "Feb 2024"], rel=1e-6
